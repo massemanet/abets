@@ -1,0 +1,24 @@
+Append-only B+tree Erlang Term Storage (pure disk based)
+
+abets is intended as a complement to dets, the standard Erlang term
+disk storage utility. It aims to rectify some bad properties of dets;
+
+1) no ordered set semantics
+2) no graceful handling of force closed files
+3) 2 GB limit per dets file
+4) it's not disk-only (it will use some RAM)
+5) dets has (as of 2010) at least one data-loss bug
+
+This can be achieved by different trade-offs;
+
+1) dets is normally faster
+2) dets has less disk space overhead
+
+So, if data integrity, crash resiliency, +2GB tables or ordered set
+semantics are more important than CPU time and disk space, abets will
+be a win. Alas, dets also has the advantage of +10 year field testing,
+while abets is partly vaporware.
+
+abets is inspired by the eminent CouchDB (couchdb.apache.org), but
+aims to be a more generic implementation of an Append-only B+tree data
+structure.
