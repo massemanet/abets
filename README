@@ -1,3 +1,5 @@
+N.B. This is work in progress, and doesn't actually work.
+
 Append-only B+tree Erlang Term Storage (pure disk based)
 
 abets is intended as a complement to dets, the standard Erlang term
@@ -13,6 +15,9 @@ This can be achieved by different trade-offs;
 
 1) dets is normally faster
 2) dets has less disk space overhead
+
+Just like Erlang itself, abets will never modify data. But data can
+become unreferenced, and subsequently garbage collected.
 
 So, if data integrity, crash resiliency, +2GB tables or ordered set
 semantics are more important than CPU time and disk space, abets will
