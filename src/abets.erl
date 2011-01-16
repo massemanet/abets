@@ -247,14 +247,17 @@ do_bulk(commit,State = #state{fd=FD,bulk_nodes=[Leaf|Nodes]}) ->
 %%% insert a new rec in bulk mode
 do_bulk(_,_,State = #state{name=Name,bulk_nodes=[]}) ->
   {{not_in_bulk_mode,Name},State};
-do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=OldNodes}) ->
+do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf,OldNodes]}) ->
   {Bin,Type,Size} = pack_val(Val),
-  {Cache,Nodes} = maybe_flush_nodes([{Type,Bin}],Key,epos(FD),Size,OldNodes),
+  Pos = epos(FD),
+  Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
+  Cache = insert_node([{Type,Bin}],Node,Pos+Size,OldNodes),
+  Nodes = maybe_flush_nodes(OldNodes),
   cache_commit(FD,Cache),
   {ok,State#state{bulk_nodes=Nodes}}.
 
-maybe_flush_nodes(Cache,Key,Pos,Size,Nodes) ->
-  {Cache,Nodes}.
+maybe_flush_nodes(Nodes) ->
+  Nodes.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
