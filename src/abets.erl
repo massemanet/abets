@@ -9,7 +9,8 @@
 
 -export([unit/0, unit/1
          , wunit/0, wunit/1
-         , do_lookup/2]).
+         , do_lookup/2
+         , unit_bulk/0]).
 
 -export([handle_call/3
          , init/1
@@ -539,6 +540,11 @@ to_binary(Term) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ad-hoc unit testing
+
+unit_bulk() ->
+  catch abets:destroy(foo),
+  abets:new(foo,[bulk]),
+  [abets:bulk(foo,N,{mange,1})||N<-[10,11]].
 
 unit() ->
   unit(10000).
