@@ -162,7 +162,7 @@ safer(What,State) ->
   end.
 
 do_safer({lookup,Key},State)     -> {do_lookup(Key,State#state.fd),State};
-do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State#state.fd),State};
+do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
 do_safer({bulk,Key,Val},State)   -> do_bulk(Key,Val,State);
 do_safer({bulk,commit},State)    -> do_bulk(commit,State);
 do_safer({decompose,N},State)    -> {do_decompose(N,State#state.fd),State}.
@@ -224,6 +224,8 @@ find_path(Key,FD) ->
 
 find_path(FD,Key,{Node,_},O) ->
   case Node of
+    <<"ABETS v1">> ->
+      [];
     #internal{pointer=Pointer,recs=Recs} ->
       find_path(FD,Key,read_blob_fw(FD,new_pos(Key,Recs,Pointer)),[Node|O]);
     #leaf{} ->
@@ -247,22 +249,24 @@ do_bulk(commit,State = #state{fd=FD,bulk_nodes=[Leaf|Nodes]}) ->
 %%% insert a new rec in bulk mode
 do_bulk(_,_,State = #state{name=Name,bulk_nodes=[]}) ->
   {{not_in_bulk_mode,Name},State};
-do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf,OldNodes]}) ->
-  {Bin,Type,Size} = pack_val(Val),
+do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
+  {Bin,Type,Len,Size} = pack_val(Val),
   Pos = epos(FD),
   Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
-  Cache = insert_node([{Type,Bin}],Node,Pos+Size,OldNodes),
-  Nodes = maybe_flush_nodes(OldNodes),
+  OldCache = insert_node([{Len,Type,Bin}],Node,Pos+Size,OldNodes),
+  {Cache,Nodes} = maybe_flush_cache(OldCache),
   cache_commit(FD,Cache),
   {ok,State#state{bulk_nodes=Nodes}}.
 
-maybe_flush_nodes(Nodes) ->
-  Nodes.
+maybe_flush_cache(Cache) ->
+  {[{Type,Bin} || {_,Type,Bin} <- Cache],[]}.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
-do_insert(Key,Val,FD) ->
-  {Bin,Type,Size} = pack_val(Val),
+do_insert(_,_,#state{bulk_nodes=[_|_]}) ->
+  in_bulk_mode;
+do_insert(Key,Val,#state{fd=FD,bulk_nodes=[]}) ->
+  {Bin,Type,_,Size} = pack_val(Val),
   [Leaf|Nodes] = find_path(Key,FD),
   Pos = epos(FD),
   Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
@@ -270,8 +274,8 @@ do_insert(Key,Val,FD) ->
   cache_commit(FD,Cache).
 
 % node is the root
-insert_node(Cache,[Node],Pos,[]) ->
-  {_,_,Cache} = pack_node(Cache,Pos,Node),
+insert_node(OldCache,[Node],Pos,[]) ->
+  {_,_,Cache} = pack_node(OldCache,Pos,Node),
   Cache;
 %% the root has split
 insert_node(C0,[XNode,YNode],Pos,[]) ->
@@ -375,7 +379,7 @@ node_size(#internal{size=Size}) -> Size;
 node_size(    #leaf{size=Size}) -> Size.
 
 pack_node(Cache,Pos,Node) ->
-  {Bin,Type,Size} = pack_val(Node),
+  {Bin,Type,_,Size} = pack_val(Node),
   {node_to_rec(Node,Pos),Size,[{Type,Bin}|Cache]}.
 
 node_to_rec(#internal{prog=Key},Pointer) -> #rec{key=Key,pointer=Pointer};
@@ -396,8 +400,8 @@ do_create(Tab) ->
   file:delete(filename(Tab)),
   {FD,[]} = do_open(Tab),
   Pointer = byte_size(?HEADER)+?PAD_BYTES+?PAD_BYTES,
-  {LeafBin,LeafType,_} = pack_val(#leaf{}),
-  {RootBin,RootType,_} = pack_val(#internal{pointer=Pointer}),
+  {LeafBin,LeafType,_,_} = pack_val(#leaf{}),
+  {RootBin,RootType,_,_} = pack_val(#internal{pointer=Pointer}),
   write(FD,[{?TYPE_BINARY,?HEADER},{LeafType,LeafBin},{RootType,RootBin}]),
   {FD,[]}.
 
@@ -518,6 +522,7 @@ pack_val(Val) ->
   Bin = to_binary(Val),
   {Bin,
    type(Val),
+   rec_len(Val),
    byte_size(Bin)+?PAD_BYTES+?PAD_BYTES}.
 
 type(#internal{})         -> ?TYPE_INTERNAL;
@@ -525,7 +530,10 @@ type(#leaf{})             -> ?TYPE_LEAF;
 type(B) when is_binary(B) -> ?TYPE_BINARY;
 type(_)                   -> ?TYPE_TERM.
 
-
+rec_len(#internal{size=Len}) -> Len;
+rec_len(#leaf{size=Len})     -> Len;
+rec_len(_)                   -> null.
+  
 to_binary(Term) ->
   term_to_binary(Term,[{compressed,3},{minor_version,1}]).
 
