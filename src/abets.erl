@@ -260,18 +260,23 @@ do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
   {ok,State#state{bulk_nodes=Nodes}}.
 
 maybe_flush_cache(Cache) ->
-  {[{Type,Bin} || {_,Type,Bin} <- Cache],[]}.
+  lists:foldl(fun flusher/2,{[],[]},Cache).
+
+flusher({_,?TYPE_INTERNAL,_} = X,{C,N}) -> {C,N++[X]};
+flusher({_,?TYPE_LEAF,_} = X,{C,N})     -> {C,N++[X]};
+flusher({_,?TYPE_TERM,_} = X,{C,N})     -> {C++[X],N};
+flusher({_,?TYPE_BINARY,_}   = X,{C,N}) -> {C++[X],N}.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
 do_insert(_,_,#state{bulk_nodes=[_|_]}) ->
   in_bulk_mode;
 do_insert(Key,Val,#state{fd=FD,bulk_nodes=[]}) ->
-  {Bin,Type,_,Size} = pack_val(Val),
+  {Bin,Type,Len,Size} = pack_val(Val),
   [Leaf|Nodes] = find_path(Key,FD),
   Pos = epos(FD),
   Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
-  Cache = insert_node([{Type,Bin}],Node,Pos+Size,Nodes),
+  Cache = insert_node([{Len,Type,Bin}],Node,Pos+Size,Nodes),
   cache_commit(FD,Cache).
 
 % node is the root
@@ -380,8 +385,8 @@ node_size(#internal{size=Size}) -> Size;
 node_size(    #leaf{size=Size}) -> Size.
 
 pack_node(Cache,Pos,Node) ->
-  {Bin,Type,_,Size} = pack_val(Node),
-  {node_to_rec(Node,Pos),Size,[{Type,Bin}|Cache]}.
+  {Bin,Type,Len,Size} = pack_val(Node),
+  {node_to_rec(Node,Pos),Size,[{Len,Type,Bin}|Cache]}.
 
 node_to_rec(#internal{prog=Key},Pointer) -> #rec{key=Key,pointer=Pointer};
 node_to_rec(#leaf{recs=[]},Pointer)      -> Pointer;
@@ -421,7 +426,10 @@ epos(FD) ->
   Pos.
 
 cache_commit(FD,Cache) ->
-  write(FD,lists:reverse(Cache)).
+  write(FD,reverse_cache(Cache,[])).
+
+reverse_cache([{_,Type,Bin}|Cache],O) -> reverse_cache(Cache,[{Type,Bin}|O]);
+reverse_cache([],O) -> O.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
