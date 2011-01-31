@@ -225,8 +225,6 @@ find_path(Key,FD) ->
 
 find_path(FD,Key,{Node,_},O) ->
   case Node of
-    <<"ABETS v1">> ->
-      [];
     #internal{pointer=Pointer,recs=Recs} ->
       find_path(FD,Key,read_blob_fw(FD,new_pos(Key,Recs,Pointer)),[Node|O]);
     #leaf{} ->
@@ -251,10 +249,10 @@ do_bulk(commit,State = #state{fd=FD,bulk_nodes=[Leaf|Nodes]}) ->
 do_bulk(_,_,State = #state{name=Name,bulk_nodes=[]}) ->
   {{not_in_bulk_mode,Name},State};
 do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
-  {Bin,Type,Len,Size} = pack_val(Val),
+  {Bin,Size} = pack_val(Val),
   Pos = epos(FD),
   Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
-  OldCache = insert_node([{Len,Type,Bin}],Node,Pos+Size,OldNodes),
+  OldCache = insert_node([{Val,Bin}],Node,Pos+Size,OldNodes),
   {Cache,Nodes} = maybe_flush_cache(OldCache),
   cache_commit(FD,Cache),
   {ok,State#state{bulk_nodes=Nodes}}.
@@ -262,21 +260,20 @@ do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
 maybe_flush_cache(Cache) ->
   lists:foldl(fun flusher/2,{[],[]},Cache).
 
-flusher({_,?TYPE_INTERNAL,_} = X,{C,N}) -> {C,N++[X]};
-flusher({_,?TYPE_LEAF,_} = X,{C,N})     -> {C,N++[X]};
-flusher({_,?TYPE_TERM,_} = X,{C,N})     -> {C++[X],N};
-flusher({_,?TYPE_BINARY,_}   = X,{C,N}) -> {C++[X],N}.
+flusher({#leaf{},_} = X,{C,N})     -> {C,N++[X]};
+flusher({#internal{},_} = X,{C,N}) -> {C,N++[X]};
+flusher({_,_} = X,{C,N})           -> {C++[X],N}.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
 do_insert(_,_,#state{bulk_nodes=[_|_]}) ->
   in_bulk_mode;
 do_insert(Key,Val,#state{fd=FD,bulk_nodes=[]}) ->
-  {Bin,Type,Len,Size} = pack_val(Val),
+  {Bin,Size} = pack_val(Val),
   [Leaf|Nodes] = find_path(Key,FD),
   Pos = epos(FD),
   Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
-  Cache = insert_node([{Len,Type,Bin}],Node,Pos+Size,Nodes),
+  Cache = insert_node([{Val,Bin}],Node,Pos+Size,Nodes),
   cache_commit(FD,Cache).
 
 % node is the root
@@ -385,8 +382,8 @@ node_size(#internal{size=Size}) -> Size;
 node_size(    #leaf{size=Size}) -> Size.
 
 pack_node(Cache,Pos,Node) ->
-  {Bin,Type,Len,Size} = pack_val(Node),
-  {node_to_rec(Node,Pos),Size,[{Len,Type,Bin}|Cache]}.
+  {Bin,Size} = pack_val(Node),
+  {node_to_rec(Node,Pos),Size,[{Node,Bin}|Cache]}.
 
 node_to_rec(#internal{prog=Key},Pointer) -> #rec{key=Key,pointer=Pointer};
 node_to_rec(#leaf{recs=[]},Pointer)      -> Pointer;
@@ -399,16 +396,16 @@ node_to_rec(#rec{key=Key},Pointer)       -> #rec{key=Key,pointer=Pointer}.
 do_bulk(Tab) ->
   file:delete(filename(Tab)),
   {FD,[]} = do_open(Tab),
-  write(FD,[{?TYPE_BINARY,?HEADER}]),
+  write(FD,[{header,?HEADER}]),
   {FD,[#leaf{},#internal{}]}.
 
 do_create(Tab) ->
   file:delete(filename(Tab)),
   {FD,[]} = do_open(Tab),
   Pointer = byte_size(?HEADER)+?PAD_BYTES+?PAD_BYTES,
-  {LeafBin,LeafType,_,_} = pack_val(#leaf{}),
-  {RootBin,RootType,_,_} = pack_val(#internal{pointer=Pointer}),
-  write(FD,[{?TYPE_BINARY,?HEADER},{LeafType,LeafBin},{RootType,RootBin}]),
+  {LeafBin,_} = pack_val(Leaf=#leaf{}),
+  {RootBin,_} = pack_val(Root=#internal{pointer=Pointer}),
+  write(FD,[{header,?HEADER},{Leaf,LeafBin},{Root,RootBin}]),
   {FD,[]}.
 
 do_open(Tab) ->
@@ -426,18 +423,22 @@ epos(FD) ->
   Pos.
 
 cache_commit(FD,Cache) ->
-  write(FD,reverse_cache(Cache,[])).
-
-reverse_cache([{_,Type,Bin}|Cache],O) -> reverse_cache(Cache,[{Type,Bin}|O]);
-reverse_cache([],O) -> O.
+  write(FD,lists:reverse(Cache)).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
 
-wrap({Type,Binary}) when is_binary(Binary) ->
+wrap({Term,Binary}) when is_binary(Binary) ->
+  Type = type(Term),
   BS = byte_size(Binary),
   Sz = <<BS:?SIZE_BITS/integer>>,
   [Sz,Type,Binary,Type,Sz].
+
+type(#internal{})         -> ?TYPE_INTERNAL;
+type(#leaf{})             -> ?TYPE_LEAF;
+type(header)              -> ?TYPE_BINARY;
+type(B) when is_binary(B) -> ?TYPE_BINARY;
+type(_)                   -> ?TYPE_TERM.
 
 read_blob_bw(FD,eof) -> read_blob_bw(FD,epos(FD));
 read_blob_bw(FD,End) ->
@@ -530,19 +531,8 @@ unpack(Type,B) ->
 pack_val(Val) ->
   Bin = to_binary(Val),
   {Bin,
-   type(Val),
-   rec_len(Val),
    byte_size(Bin)+?PAD_BYTES+?PAD_BYTES}.
 
-type(#internal{})         -> ?TYPE_INTERNAL;
-type(#leaf{})             -> ?TYPE_LEAF;
-type(B) when is_binary(B) -> ?TYPE_BINARY;
-type(_)                   -> ?TYPE_TERM.
-
-rec_len(#internal{size=Len}) -> Len;
-rec_len(#leaf{size=Len})     -> Len;
-rec_len(_)                   -> null.
-  
 to_binary(Term) ->
   term_to_binary(Term,[{compressed,3},{minor_version,1}]).
 
