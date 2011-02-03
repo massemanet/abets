@@ -260,9 +260,9 @@ do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
 maybe_flush_cache(Cache) ->
   lists:foldl(fun flusher/2,{[],[]},Cache).
 
-flusher({#leaf{},_} = X,{C,N})     -> {C,N++[X]};
-flusher({#internal{},_} = X,{C,N}) -> {C,N++[X]};
-flusher({_,_} = X,{C,N})           -> {C++[X],N}.
+flusher({X=#leaf{},_},{C,N})     -> {C,[X|N]};
+flusher({X=#internal{},_},{C,N}) -> {C,[X|N]};
+flusher({_,_} = X,{C,N})         -> {C++[X],N}.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
@@ -542,7 +542,8 @@ to_binary(Term) ->
 unit_bulk() ->
   catch abets:destroy(foo),
   abets:new(foo,[bulk]),
-  [abets:bulk(foo,N,{mange,1})||N<-[10,11]].
+  [abets:bulk(foo,N,{mange,N})||N<-[10,11]],
+  abets:bulk(foo,commit).
 
 unit() ->
   unit(10000).
