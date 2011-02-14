@@ -28,6 +28,8 @@
          , first/1
          , next/2]).
 
+redbug(X) ->
+  term_to_binary(X).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% the api
 
@@ -116,7 +118,7 @@ assert(Tab) ->
 -record(internal,
         {size = 0
          , type = root  %normal|root
-         , prog
+         , prog         %progenitor
          , pointer = 0
          , recs = []}).
 
@@ -260,10 +262,18 @@ do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
 maybe_flush_cache(Cache) ->
   lists:foldl(fun flusher/2,{[],[]},Cache).
 
+flusher(Ch={CN=#internal{},_},{C,[PN=#internal{}|N]}) ->
+  case is_parent(PN,CN) of
+    true -> redbug({parent,CN,PN}),{C,[CN,PN|N]};
+    false-> redbug({not_parent,CN,PN,N}),{C++[Ch],[PN|N]}
+  end;
+flusher({X=#internal{},_},{C,N})         -> {C,[X|N]};
 flusher(X={#leaf{},_},{C,[#leaf{}|_]=N}) -> {C++[X],N};
 flusher({X=#leaf{},_},{C,N})             -> {C,[X|N]};
-flusher({X=#internal{},_},{C,N})         -> {C,[X|N]};
 flusher(X={_,_},{C,N})                   -> {C++[X],N}.
+
+is_parent(#internal{recs=PRecs},#internal{prog=CProg}) ->
+  (hd(lists:reverse(PRecs)))#rec.key =:= CProg.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
@@ -543,7 +553,7 @@ to_binary(Term) ->
 unit_bulk() ->
   catch abets:destroy(foo),
   abets:new(foo,[bulk]),
-  [abets:bulk(foo,N,{mange,N})||N<-[10,11,12,13,14,15]],
+  [abets:bulk(foo,N,{mange,N})||N<-[10,11,12,13,14,15,16,17,18,19,20,21,22]],
   abets:bulk(foo,commit).
 
 unit() ->
