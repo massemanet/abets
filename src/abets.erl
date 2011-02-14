@@ -10,6 +10,7 @@
 -export([unit/0, unit/1
          , wunit/0, wunit/1
          , do_lookup/2
+         , unit_bulk_small/0
          , unit_bulk/0]).
 
 -export([handle_call/3
@@ -128,7 +129,8 @@ assert(Tab) ->
 
 -record(state,
         {fd
-         , bulk_nodes = []
+         , bulk_ptr = 0
+         , bulk_nodes = [[]]
          , name
          , regname
          , filename}).
@@ -137,11 +139,11 @@ assert(Tab) ->
 %% gen_server callbacks
 
 init([open,Tab]) ->
-  do_init(Tab,do_open(Tab));
+  {ok,do_init(Tab,do_open(Tab))};
 init([bulk,Tab]) ->
-  do_init(Tab,do_bulk(Tab));
+  {ok,(do_init(Tab,do_bulk(Tab)))#state{bulk_ptr=header_length()}};
 init([create,Tab]) ->
-  do_init(Tab,do_create(Tab)).
+  {ok,do_init(Tab,do_create(Tab))}.
 
 terminate(normal,[]) ->
   ok;
@@ -166,8 +168,8 @@ safer(What,State) ->
 
 do_safer({lookup,Key},State)     -> {do_lookup(Key,State#state.fd),State};
 do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
-do_safer({bulk,Key,Val},State)   -> do_bulk(Key,Val,State);
-do_safer({bulk,commit},State)    -> do_bulk(commit,State);
+do_safer({bulk,Key,Val},State)   -> do_bulk(insert,Key,Val,State);
+do_safer({bulk,commit},State)    -> do_bulk(commit,'','',State);
 do_safer({decompose,N},State)    -> {do_decompose(N,State#state.fd),State}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -178,17 +180,11 @@ do_new(Tab,How) ->
       gen_server:start({local,regname(Tab)},?MODULE,[How,Tab],[])
   end.
 
-do_init(Tab,{FD,[]}) ->
-  {ok, #state{name = Tab
-              , fd = FD
-              , regname = regname(Tab)
-              , filename = filename(Tab)}};
-do_init(Tab,{FD,Nodes}) ->
-  {ok, #state{name = Tab
-              , fd = FD
-              , regname = regname(Tab)
-              , filename = filename(Tab)
-              , bulk_nodes=Nodes}}.
+do_init(Tab,FD) ->
+  #state{name = Tab
+         , fd = FD
+         , regname = regname(Tab)
+         , filename = filename(Tab)}.
 
 filename(Tab) ->
   atom_to_list(Tab).
@@ -237,43 +233,43 @@ new_pos(_Key,[],Pos)                          -> Pos;
 new_pos(Key,[#rec{key=K}|_],Pos) when Key < K -> Pos;
 new_pos(Key,Recs,_)                           -> new_pos(Key,Recs).
 
-new_pos(_Key,[#rec{pointer=Pos}])                           -> Pos;
-new_pos(Key,[#rec{pointer=Pos},#rec{key=K}|_]) when Key < K -> Pos;
-new_pos(Key,[_|Recs])                                       -> new_pos(Key,Recs).
+new_pos(_Key,[#rec{pointer=Pos}])                         -> Pos;
+new_pos(Key,[#rec{pointer=Pos},#rec{key=K}|_]) when Key<K -> Pos;
+new_pos(Key,[_|Recs])                                     -> new_pos(Key,Recs).
+
+%%% BULK MODE
+%%% no bulking in progress
+do_bulk(_,_,_,State = #state{name=Name,bulk_ptr=0}) ->
+  {{not_in_bulk_mode,Name},State};
 
 %%% commit bulk cache and exit bulk mode
-do_bulk(commit,State = #state{fd=FD,bulk_nodes=[Leaf|Nodes]}) ->
-  C = insert_node([],[Leaf],epos(FD),Nodes),
-  cache_commit(FD,C),
-  {ok,State#state{bulk_nodes=[]}}.
+do_bulk(commit,_,_,State = #state{fd=FD,bulk_ptr=Pos,bulk_nodes=[Blobs]}) ->
+  cache_commit(FD,[mk_root([{Pos,undefined}]),mk_leaf(Blobs)]),
+  {ok,State#state{bulk_ptr=0,bulk_nodes=[]}};
 
 %%% insert a new rec in bulk mode
-do_bulk(_,_,State = #state{name=Name,bulk_nodes=[]}) ->
-  {{not_in_bulk_mode,Name},State};
-do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=[Leaf|OldNodes]}) ->
+do_bulk(insert,Key,Val,State = #state{fd=FD,bulk_ptr=Pos}) ->
+  #state{bulk_nodes=[Blobs|Is]} = State,
   {Bin,Size} = pack_val(Val),
-  Pos = epos(FD),
-  Node = update_node([#rec{key=Key,pointer=Pos}],Leaf),
-  OldCache = insert_node([{Val,Bin}],Node,Pos+Size,OldNodes),
-  {Cache,Nodes} = maybe_flush_cache(OldCache),
-  cache_commit(FD,Cache),
-  {ok,State#state{bulk_nodes=Nodes}}.
+  case length(Blobs) < ?ORDER2 of
+    true ->
+      redbug({[Blobs|Is]}),
+      cache_commit(FD,[{Val,Bin}]),
+      {ok,State#state{bulk_ptr=Pos+Size,bulk_nodes=[Blobs++[{Pos,Key}]|Is]}}
+  end.
 
-maybe_flush_cache(Cache) ->
-  lists:foldl(fun flusher/2,{[],[]},Cache).
+mk_leaf(Blobs) ->
+  pack_node(#leaf{size=length(Blobs),recs=mk_recs(Blobs)}).
 
-flusher(Ch={CN=#internal{},_},{C,[PN=#internal{}|N]}) ->
-  case is_parent(PN,CN) of
-    true -> redbug({parent,CN,PN}),{C,[CN,PN|N]};
-    false-> redbug({not_parent,CN,PN,N}),{C++[Ch],[PN|N]}
-  end;
-flusher({X=#internal{},_},{C,N})         -> {C,[X|N]};
-flusher(X={#leaf{},_},{C,[#leaf{}|_]=N}) -> {C++[X],N};
-flusher({X=#leaf{},_},{C,N})             -> {C,[X|N]};
-flusher(X={_,_},{C,N})                   -> {C++[X],N}.
+mk_root([{P0,undefined}|Kids]) ->
+  pack_node(#internal{size=length(Kids)+1,pointer=P0,recs=mk_recs(Kids)}).
 
-is_parent(#internal{recs=PRecs},#internal{prog=CProg}) ->
-  (hd(lists:reverse(PRecs)))#rec.key =:= CProg.
+mk_recs(Kids) ->
+  [#rec{key=K,pointer=P}||{P,K}<-Kids].
+
+pack_node(Node) ->
+  {Bin,_} = pack_val(Node),
+  {Node,Bin}.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
@@ -406,22 +402,22 @@ node_to_rec(#rec{key=Key},Pointer)       -> #rec{key=Key,pointer=Pointer}.
 
 do_bulk(Tab) ->
   file:delete(filename(Tab)),
-  {FD,[]} = do_open(Tab),
+  FD = do_open(Tab),
   write(FD,[{header,?HEADER}]),
-  {FD,[#leaf{},#internal{}]}.
+  FD.
 
 do_create(Tab) ->
   file:delete(filename(Tab)),
-  {FD,[]} = do_open(Tab),
-  Pointer = byte_size(?HEADER)+?PAD_BYTES+?PAD_BYTES,
+  FD = do_open(Tab),
+  Pointer = header_length(),
   {LeafBin,_} = pack_val(Leaf=#leaf{}),
   {RootBin,_} = pack_val(Root=#internal{pointer=Pointer}),
   write(FD,[{header,?HEADER},{Leaf,LeafBin},{Root,RootBin}]),
-  {FD,[]}.
+  FD.
 
 do_open(Tab) ->
   {ok,FD} = file:open(filename(Tab),[read,append,binary,raw]),
-  {FD,[]}.
+  FD.
 
 write(FD,IOlist) ->
   ok = file:write(FD,[wrap(E) || E <- IOlist]),
@@ -435,6 +431,9 @@ epos(FD) ->
 
 cache_commit(FD,Cache) ->
   write(FD,lists:reverse(Cache)).
+
+header_length() -> 
+  byte_size(?HEADER)+?PAD_BYTES+?PAD_BYTES.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
@@ -554,6 +553,12 @@ unit_bulk() ->
   catch abets:destroy(foo),
   abets:new(foo,[bulk]),
   [abets:bulk(foo,N,{mange,N})||N<-[10,11,12,13,14,15,16,17,18,19,20,21,22]],
+  abets:bulk(foo,commit).
+
+unit_bulk_small() ->
+  catch abets:destroy(foo),
+  abets:new(foo,[bulk]),
+  [abets:bulk(foo,N,{mange,N})||N<-[10,11,12,13]],
   abets:bulk(foo,commit).
 
 unit() ->
