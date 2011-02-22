@@ -246,8 +246,10 @@ do_bulk(_,_,_,State = #state{name=Name,bulk_ptr=0}) ->
 %%% commit bulk cache and exit bulk mode
 do_bulk(commit,_,_,State = #state{fd=FD,
                                   bulk_ptr=Pos,
-                                  bulk_nodes={Blobs,[],[]}}) ->
-  cache_commit(FD,[mk_root([{Pos,undefined}]),mk_leaf(Blobs)]),
+                                  bulk_nodes={Blobs,Leaves,Ints}}) ->
+  {NewLeaves,NewPos} = finalize_leaves(Blobs,Pos),
+  NewInts = finalize_ints(Leaves++NewLeaves,NewPos,Ints),
+  cache_commit(FD,NewInts++NewLeaves),
   {ok,State#state{bulk_ptr=0,bulk_nodes=[]}};
 
 %%% insert a new rec in bulk mode
@@ -282,6 +284,21 @@ do_bulk(insert,Key,Val,State = #state{fd=FD,
                                       Ints}}}
       end
   end.
+
+finalize_leaves(Blobs,Pos) ->
+  case length(Blobs) < ?ORDER2 of
+    true ->
+      {Leaf,Bin,Size} = mk_leaf(Blobs),
+      {[{Leaf,Bin}],Pos+Size};
+    false ->
+      {H,T} = lists:split(?ORDER2,Blobs),
+      {HLeaf,HBin,HSize} = mk_leaf(H),
+      {TLeaf,TBin,TSize} = mk_leaf(T),
+      {[{Pos,HLeaf,HBin},{Pos+HSize,TLeaf,TBin}],Pos+HSize+TSize}
+  end.
+
+finalize_ints(Kids,Pos,[Ints|UpperInts]) ->
+  
 
 mk_leaf(Blobs) ->
   pack_node(#leaf{size=length(Blobs),recs=mk_recs(Blobs)}).
