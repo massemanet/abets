@@ -97,6 +97,7 @@ assert(Tab) ->
 %% declarative
 
 -define(ORDER2,4).       %order*2
+-define(ORDER4,8).       %order*4
 -define(BLOCK_SIZE,2621).%1048576).%
 
 -define(HEADER,<<"ABETS v1">>).
@@ -130,7 +131,7 @@ assert(Tab) ->
 -record(state,
         {fd
          , bulk_ptr = 0
-         , bulk_nodes = [[]]
+         , bulk_nodes = {[],[],[]}  % {Blobs,Leaves,Internals}
          , name
          , regname
          , filename}).
@@ -243,23 +244,58 @@ do_bulk(_,_,_,State = #state{name=Name,bulk_ptr=0}) ->
   {{not_in_bulk_mode,Name},State};
 
 %%% commit bulk cache and exit bulk mode
-do_bulk(commit,_,_,State = #state{fd=FD,bulk_ptr=Pos,bulk_nodes=[Blobs]}) ->
+do_bulk(commit,_,_,State = #state{fd=FD,
+                                  bulk_ptr=Pos,
+                                  bulk_nodes={Blobs,[],[]}}) ->
   cache_commit(FD,[mk_root([{Pos,undefined}]),mk_leaf(Blobs)]),
   {ok,State#state{bulk_ptr=0,bulk_nodes=[]}};
 
 %%% insert a new rec in bulk mode
-do_bulk(insert,Key,Val,State = #state{fd=FD,bulk_ptr=Pos}) ->
-  #state{bulk_nodes=[Blobs|Is]} = State,
+do_bulk(insert,Key,Val,State = #state{fd=FD,
+                                      bulk_ptr=Pos,
+                                      bulk_nodes={Blobs,Leaves,Is}}) ->
   {Bin,Size} = pack_val(Val),
-  case length(Blobs) < ?ORDER2 of
+  case length(Blobs) < ?ORDER4 of
     true ->
-      redbug({[Blobs|Is]}),
+      redbug({bi,{Blobs,Leaves,Is}}),
       cache_commit(FD,[{Val,Bin}]),
-      {ok,State#state{bulk_ptr=Pos+Size,bulk_nodes=[Blobs++[{Pos,Key}]|Is]}}
+      {ok,State#state{bulk_ptr=Pos+Size,
+                      bulk_nodes={Blobs++[{Pos,Key}],Leaves,Is}}};
+    false->
+      redbug({li,{Blobs,Leaves,Is}}),
+      {H,T} = lists:split(?ORDER2,Blobs),
+      {Leaf,LeafBin,LeafSize} = mk_leaf(H),
+      case length(Leaves) < ?ORDER4 of
+        true ->
+          cache_commit(FD,[{Leaf,LeafBin},{Val,Bin}]),
+          {ok,State#state{bulk_ptr=Pos+Size+LeafSize,
+                          bulk_nodes={T++[{Pos,Key}],
+                                      Leaves++[{Pos+Size,Key}],
+                                      Is}}};
+        false->
+          {Hleaf,Tleaf} = lists:split(?ORDER2,Leaves),
+          {Ints,OutInts,OutIntsSize} = mk_int(Hleaf,Is,Pos+Size+LeafSize),
+          cache_commit(FD,OutInts++[{Leaf,LeafBin},{Val,Bin}]),
+          {ok,State#state{bulk_ptr=Pos+Size+LeafSize+OutIntsSize,
+                          bulk_nodes={T++[{Pos,Key}],
+                                      Tleaf++[{Pos+Size,Key}],
+                                      Ints}}}
+      end
   end.
 
 mk_leaf(Blobs) ->
   pack_node(#leaf{size=length(Blobs),recs=mk_recs(Blobs)}).
+
+mk_int(Kids=[{P0,_}|_],[Ints|HigherInts],Pos) ->
+  case length(Ints) < ?ORDER4 of
+    true ->
+      {[Ints++[pack_node(#internal{size=length(Kids),
+                                   pointer=P0,
+                                   recs=mk_recs(Kids)})]|HigherInts],
+       [],0};
+    false->
+      Pos
+  end.
 
 mk_root([{P0,undefined}|Kids]) ->
   pack_node(#internal{size=length(Kids)+1,pointer=P0,recs=mk_recs(Kids)}).
@@ -268,14 +304,14 @@ mk_recs(Kids) ->
   [#rec{key=K,pointer=P}||{P,K}<-Kids].
 
 pack_node(Node) ->
-  {Bin,_} = pack_val(Node),
-  {Node,Bin}.
+  {Bin,Size} = pack_val(Node),
+  {Node,Bin,Size}.
 
 %%% insert new rec by writing the value and rebuilding the nodes above
 %%% and including the rec's leaf
-do_insert(_,_,#state{bulk_nodes=[_|_]}) ->
+do_insert(_,_,#state{bulk_ptr=0}) ->
   in_bulk_mode;
-do_insert(Key,Val,#state{fd=FD,bulk_nodes=[]}) ->
+do_insert(Key,Val,#state{fd=FD}) ->
   {Bin,Size} = pack_val(Val),
   [Leaf|Nodes] = find_path(Key,FD),
   Pos = epos(FD),
@@ -419,11 +455,6 @@ do_open(Tab) ->
   {ok,FD} = file:open(filename(Tab),[read,append,binary,raw]),
   FD.
 
-write(FD,IOlist) ->
-  ok = file:write(FD,[wrap(E) || E <- IOlist]),
-%  file:sync(FD),
-  ok.
-
 %% pos @ eof
 epos(FD) ->
   {ok,Pos} = file:position(FD,eof),
@@ -432,12 +463,19 @@ epos(FD) ->
 cache_commit(FD,Cache) ->
   write(FD,lists:reverse(Cache)).
 
-header_length() -> 
+write(FD,IOlist) ->
+  ok = file:write(FD,[wrap(E) || E <- IOlist]),
+%  file:sync(FD),
+  ok.
+
+header_length() ->
   byte_size(?HEADER)+?PAD_BYTES+?PAD_BYTES.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
 
+wrap({Term,Binary,_Size}) ->
+  wrap({Term,Binary});
 wrap({Term,Binary}) when is_binary(Binary) ->
   Type = type(Term),
   BS = byte_size(Binary),
