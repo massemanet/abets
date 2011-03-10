@@ -37,23 +37,41 @@
          nodes=[[],[]]}).
 
 go(L) ->
-  lists:foldl(fun(N,S)->add_blob({k,N},{v,N},S)end,#state{},lists:seq(1,L)).
+  finalize(lists:foldl(fun add_blob_f/2,#state{},lists:seq(1,L))).
+
+add_blob_f(N,S)->
+  add_blob({k,N},{v,N},S).
+
+finalize(S0 = #state{cache=[],blobs=Blobs}) ->
+  {Blobs1,Blobs2} = lists:split(length(Blobs) div 2,Blobs),
+  Leaf1 = mk_leaf(Blobs1,S0#state.eof),
+  S1 = check_nodes(S0#state{nodes=add_leaf(Leaf1,S0),
+                            cache=Blobs1++[Leaf1],
+                            eof=Leaf1#node.pos+Leaf1#node.size,
+                            blobs=Blobs2}),
+  Leaf2 = mk_leaf(Blobs2,S1#state.eof),
+  check_nodes(S1#state{nodes=add_leaf(Leaf2,S1),
+                            cache=S1#state.cache++Blobs2++[Leaf2],
+                            eof=Leaf2#node.pos+Leaf2#node.size,
+                            blobs=[]}).
 
 add_blob(Key,Val,S = #state{blobs=Blobs}) ->
   case S#state.size2 < length(Blobs) of
     true ->
-      [Leaves|Ints] = S#state.nodes,
       {BlobsH,BlobsT} = lists:split(S#state.size,Blobs),
       NewLeaf = mk_leaf(BlobsH,S#state.eof),
       flush_cache(
         check_nodes(
-          S#state{nodes=[Leaves++[NewLeaf]|Ints],
+          S#state{nodes=add_leaf(NewLeaf,S),
                   cache=BlobsH++[NewLeaf],
                   eof=NewLeaf#node.pos+NewLeaf#node.size,
                   blobs=BlobsT++[mk_blob(Key,Val)]}));
     false->
       S#state{blobs=Blobs++[mk_blob(Key,Val)]}
   end.
+
+add_leaf(Leaf,#state{nodes=[Leaves|Ints]}) ->
+  [Leaves++[Leaf]|Ints].
 
 flush_cache(S) ->
   io:fwrite("FLUSHING:~n~p~n",[S#state.cache]),
