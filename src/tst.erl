@@ -43,17 +43,29 @@ add_blob_f(N,S)->
   add_blob({k,N},{v,N},S).
 
 finalize(S0 = #state{cache=[],blobs=Blobs}) ->
-  {Blobs1,Blobs2} = lists:split(length(Blobs) div 2,Blobs),
-  Leaf1 = mk_leaf(Blobs1,S0#state.eof),
-  S1 = check_nodes(S0#state{nodes=add_leaf(Leaf1,S0),
-                            cache=Blobs1++[Leaf1],
-                            eof=Leaf1#node.pos+Leaf1#node.size,
-                            blobs=Blobs2}),
-  Leaf2 = mk_leaf(Blobs2,S1#state.eof),
-  check_nodes(S1#state{nodes=add_leaf(Leaf2,S1),
-                            cache=S1#state.cache++Blobs2++[Leaf2],
-                            eof=Leaf2#node.pos+Leaf2#node.size,
-                            blobs=[]}).
+  case length(Blobs) =< S0#state.size of
+    true ->
+      Leaf = mk_leaf(Blobs,S0#state.eof),
+      S1 =
+        check_nodes(S0#state{nodes=add_leaf(Leaf,S0),
+                             cache=Blobs++[Leaf],
+                             eof=Leaf#node.pos+Leaf#node.size,
+                             blobs=[]});
+    false->
+      {Blobs1,Blobs2} = lists:split(length(Blobs) div 2,Blobs),
+      Leaf1 = mk_leaf(Blobs1,S0#state.eof),
+      S1 =
+        check_nodes(S0#state{nodes=add_leaf(Leaf1,S0),
+                             cache=Blobs1++[Leaf1],
+                             eof=Leaf1#node.pos+Leaf1#node.size,
+                             blobs=Blobs2}),
+      Leaf2 = mk_leaf(Blobs2,S1#state.eof),
+      S2 =
+        check_nodes(S1#state{nodes=add_leaf(Leaf2,S1),
+                             cache=S1#state.cache++Blobs2++[Leaf2],
+                             eof=Leaf2#node.pos+Leaf2#node.size,
+                             blobs=[]})
+  end.
 
 add_blob(Key,Val,S = #state{blobs=Blobs}) ->
   case S#state.size2 < length(Blobs) of
