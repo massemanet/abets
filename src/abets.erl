@@ -30,7 +30,7 @@
          , next/2]).
 
 redbug(X) ->
-  term_to_binary(X).
+  {X}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% the api
 
@@ -289,7 +289,7 @@ finalize_leaves(Blobs,Pos) ->
   case length(Blobs) < ?ORDER2 of
     true ->
       {Leaf,Bin,Size} = mk_leaf(Blobs),
-      {[{Leaf,Bin}],Pos+Size};
+      {[{Pos,Leaf,Bin}],Pos+Size};
     false ->
       {H,T} = lists:split(?ORDER2,Blobs),
       {HLeaf,HBin,HSize} = mk_leaf(H),
@@ -298,7 +298,10 @@ finalize_leaves(Blobs,Pos) ->
   end.
 
 finalize_ints(Kids,Pos,[Ints|UpperInts]) ->
-  
+  case length(Kids) < ?ORDER2 of
+    true -> ;
+    false->
+  end.
 
 mk_leaf(Blobs) ->
   pack_node(#leaf{size=length(Blobs),recs=mk_recs(Blobs)}).
