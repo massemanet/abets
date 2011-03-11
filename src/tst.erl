@@ -16,8 +16,8 @@
         {key,
          data,
          type=term,
-         bin,
-         size}).
+         size,
+         bin}).
 
 -record(node,
         {pos,
@@ -66,7 +66,7 @@ finalize(S0 = #state{cache=[],blobs=Blobs}) ->
                              eof=Leaf2#node.pos+Leaf2#node.size,
                              blobs=[]})
   end,
-  finalize_nodes(S2).
+  flush_cache(finalize_nodes(S2)).
 
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
   case length(Ns) =< S#state.size of
@@ -81,7 +81,7 @@ finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
       Node2 = mk_node(N2s,NewEof1),
       NewEof2 = Node2#node.pos+Node2#node.size,
       finalize_nodes(S#state{cache=Cache++[Node1,Node2],
-                             nodes=[Node1,Node2],
+                             nodes=[[Node1,Node2]],
                              eof=NewEof2})
   end;
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[NHs|NTs]}) ->
@@ -120,10 +120,6 @@ add_blob(Key,Val,S = #state{blobs=Blobs}) ->
 
 add_leaf(Leaf,#state{nodes=[Leaves|Ints]}) ->
   [Leaves++[Leaf]|Ints].
-
-flush_cache(S) ->
-  io:fwrite("FLUSHING:~n~p~n",[S#state.cache]),
-  S#state{cache=[]}.
 
 check_nodes(S = #state{nodes=Nodes}) ->
   {NewNodes,NewCache,NewEof} = chk_nodes(Nodes,S),
@@ -201,3 +197,19 @@ noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
 
 int_disk_format(T) ->
   term_to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+
+flush_cache(S) ->
+  io:fwrite("FLUSHING:~n~p~n",[[form(I)||I<-S#state.cache]]),
+  S#state{cache=[]}.
+
+form(N = #blob{}) -> wrap(blob,N);
+form(N = #node{}) -> [{T,unroll_bin(V)}||{T,V}<-wrap(node,N)].
+
+wrap(RecName,Rec) -> 
+  lists:zip(rec_info(RecName),tl(tuple_to_list(Rec))).
+
+unroll_bin(B) when is_binary(B) -> binary_to_term(B);
+unroll_bin(X) -> X.
+
+rec_info(node) -> record_info(fields,node);
+rec_info(blob) -> record_info(fields,blob).
