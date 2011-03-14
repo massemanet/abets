@@ -34,8 +34,8 @@
 -define(SIZE,4).
 
 -record(state,
-        {size=?SIZE,
-         size2=?SIZE*2,
+        {len=?SIZE,
+         len2=?SIZE*2,
          eof=0,
          block_size=2621,
          name,
@@ -196,7 +196,7 @@ decomp(State,N,{Term,Pos},O)  ->
 
 
 finalize(S0 = #state{cache=[],blobs=Blobs}) ->
-  case length(Blobs) =< S0#state.size of
+  case length(Blobs) =< S0#state.len of
     true ->
       Leaf = mk_leaf(Blobs,S0#state.eof),
       S2 =
@@ -222,7 +222,7 @@ finalize(S0 = #state{cache=[],blobs=Blobs}) ->
   flush_cache(finalize_nodes(S2)).
 
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
-  case length(Ns) =< S#state.size of
+  case length(Ns) =< S#state.len of
     true ->
       Root = mk_node(Ns,Eof),
       NewEof = Root#node.pos+Root#node.size,
@@ -238,7 +238,7 @@ finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
                              eof=NewEof2})
   end;
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[NHs|NTs]}) ->
-  case length(NHs) =< S#state.size of
+  case length(NHs) =< S#state.len of
     true ->
       Node = mk_node(NHs,Eof),
       NewEof = Node#node.pos+Node#node.size,
@@ -262,9 +262,9 @@ do_bulk(insert,Key,Val,State)->
   {ok,add_blob(Key,Val,State)}.
 
 add_blob(Key,Val,S = #state{blobs=Blobs}) ->
-  case S#state.size2 < length(Blobs) of
+  case S#state.len2 < length(Blobs) of
     true ->
-      {BlobsH,BlobsT} = lists:split(S#state.size,Blobs),
+      {BlobsH,BlobsT} = lists:split(S#state.len,Blobs),
       NewLeaf = mk_leaf(BlobsH,S#state.eof),
       flush_cache(
         check_nodes(
@@ -285,7 +285,7 @@ check_nodes(S = #state{nodes=Nodes}) ->
           cache=S#state.cache++NewCache,
           eof=NewEof}.
 
-chk_nodes(Nodes,#state{size=S,size2=S2,eof=Eof}) ->
+chk_nodes(Nodes,#state{len=S,len2=S2,eof=Eof}) ->
   chk_nodes(Nodes,{[],[],Eof},{S,S2}).
 
 chk_nodes([],O,_)         -> O;
@@ -322,7 +322,7 @@ mk_leaf(Blobs,Eof) ->
   T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
   Bin = leaf_disk_format(T),
   #node{length=T#tmp.len,
-        size=byte_size(Bin),
+        size=byte_size(Bin)+pad_size(),
         min_key=T#tmp.min,
         max_key=T#tmp.max,
         pos=T#tmp.eof,
@@ -341,7 +341,7 @@ mk_node(Nodes,Eof) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
   Bin = int_disk_format(T),
   #node{length=T#tmp.len,
-        size=byte_size(Bin),
+        size=byte_size(Bin)+pad_size(),
         min_key=T#tmp.min,
         max_key=T#tmp.max,
         pos=Eof,
@@ -396,6 +396,9 @@ filename(Tab) ->
 
 regname(Tab) ->
   list_to_atom("abets_"++atom_to_list(Tab)).
+
+pad_size() ->
+  ?PAD_BYTES+?PAD_BYTES.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
