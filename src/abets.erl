@@ -59,10 +59,8 @@ delete(Tab, Key) ->
   call(Tab,{delete,Key}).
 
 lookup(Tab, Key) ->
-  try {Res} = call(Tab,{lookup,Key}),
-      Res
-  catch _:{badmatch,X} ->
-      throw(X)
+  try {Res} = call(Tab,{lookup,Key}), Res
+  catch _:{badmatch,X} -> throw(X)
   end.
 
 first(Tab) ->

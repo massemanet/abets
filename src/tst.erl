@@ -6,11 +6,46 @@
 
 -module('tst').
 -author('mats cronqvist').
--export([go/1]).
+
+-export([tree/1,
+         unit/0, unit/1
+         , wunit/0, wunit/1
+         , unit_bulk_small/0
+         , unit_bulk/0]).
+
+-export([handle_call/3
+         , init/1
+         , terminate/2]).
+
+-export([new/1, new/2
+         , open/1
+         , close/1
+         , destroy/1
+         , decompose/1, decompose/2
+         , insert/3
+         , delete/2
+         , lookup/2
+         , bulk/2, bulk/3
+         , first/1
+         , next/2]).
 
 
 
 -define(SIZE,4).
+
+-record(state,
+        {size=?SIZE,
+         size2=?SIZE*2,
+         eof=0,
+         block_size=2621,
+         name,
+         fd,
+         cache=[],
+         blobs=[],
+         nodes=[[]]}).
+
+-record(header,
+        {bin = <<"ABETS v1">>}).
 
 -record(blob,
         {key,
@@ -28,19 +63,137 @@
          zero_pos=0,
          bin}).
 
--record(state,
-        {size=?SIZE,
-         size2=?SIZE*2,
-         eof=0,
-         cache=[],
-         blobs=[],
-         nodes=[[]]}).
-
-go(L) ->
+tree(L) ->
   finalize(lists:foldl(fun add_blob_f/2,#state{},lists:seq(1,L))).
 
 add_blob_f(N,S)->
   add_blob({k,N},{v,N},S).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% the api
+
+new(Tab) ->
+  new(Tab,[]).
+
+new(Tab,Opts) ->
+  case proplists:get_value(bulk,Opts) of
+    true -> do_new(Tab,bulk);
+    _    -> do_new(Tab,create)
+  end.
+
+open(Tab) ->
+  do_new(Tab,open).
+
+insert(Tab,Key,Val) ->
+  call(Tab,{insert,Key,Val}).
+
+bulk(Tab,commit) ->
+  call(Tab,{bulk,commit}).
+
+bulk(Tab,Key,Val) ->
+  call(Tab,{bulk,Key,Val}).
+
+delete(Tab, Key) ->
+  call(Tab,{delete,Key}).
+
+lookup(Tab, Key) ->
+  try {Res} = call(Tab,{lookup,Key}),
+       Res
+  catch _:{badmatch,X} ->
+      throw(X)
+  end.
+
+first(Tab) ->
+  call(Tab,first).
+
+next(Tab, Key) ->
+  call(Tab,{next,Key}).
+
+destroy(Tab) ->
+  call(Tab,destroy).
+
+close(Tab) ->
+  call(Tab,close).
+
+decompose(Tab) -> decompose(Tab,0).
+
+decompose(Tab,N) when is_integer(N), 0 =< N ->
+  catch open(Tab),
+  call(Tab,{decompose,N}).
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+call(Tab,What) ->
+  gen_server:call(assert(Tab),What).
+
+assert(Tab) ->
+  case whereis(RegName = regname(Tab)) of
+    undefined -> exit({no_such_table,Tab});
+    _         -> RegName
+  end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% gen_server callbacks
+
+init([open,Tab]) ->
+  {ok,do_init(Tab,do_open(Tab))};
+init([bulk,Tab]) ->
+  {ok,do_init(Tab,do_open_bulk(Tab))};
+init([create,Tab]) ->
+  {ok,do_init(Tab,do_open_normal(Tab))}.
+
+terminate(normal,[]) ->
+  ok;
+terminate(normal,Filename) ->
+  file:delete(Filename),
+  ok;
+terminate(What,_State) ->
+  error_logger:error_report(What).
+
+handle_call(close,_From,_State) ->
+  {stop,normal,ok,[]};
+handle_call(destroy,_From,State) ->
+  {stop,normal,ok,filename(State#state.name)};
+handle_call(What,_From,OldState) ->
+  {Reply,State} = safer(What,OldState),
+  {reply,Reply,State}.
+
+safer(What,State) ->
+  try do_safer(What,State)
+  catch C:R -> exit({C,R,erlang:get_stacktrace()})
+  end.
+
+%% do_safer({lookup,Key},State)     -> {do_lookup(Key,State#state.fd),State};
+%% do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
+do_safer({bulk,Key,Val},State)   -> do_bulk(insert,Key,Val,State);
+do_safer({bulk,commit},State)    -> do_bulk(commit,'','',State);
+do_safer({decompose,N},State)    -> {do_decompose(N,State),State}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_new(Tab,How) ->
+  try assert(Tab),
+      exit({already_exists,Tab})
+  catch _:{no_such_table,Tab} ->
+      gen_server:start({local,regname(Tab)},?MODULE,[How,Tab],[])
+  end.
+
+do_init(Tab,FD) ->
+  #state{name = Tab
+         , fd = FD}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% B+tree logic
+
+%%%
+do_decompose(N,State) ->
+  decomp(State,N,read_blob_bw(eof,State),[]).
+
+decomp(_,0,{Term,Pos},O) -> [{Pos,Term}|O];
+decomp(_,_,{Term,0},O)  -> [{0,Term}|O];
+decomp(State,N,{Term,Pos},O)  ->
+  decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Term}|O]).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 
 finalize(S0 = #state{cache=[],blobs=Blobs}) ->
   case length(Blobs) =< S0#state.size of
@@ -103,6 +256,11 @@ finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[NHs|NTs]}) ->
                              eof=NewEof2})
   end.
 
+do_bulk(commit,_,_,State)->
+  {ok,finalize(State)};
+do_bulk(insert,Key,Val,State)->
+  {ok,add_blob(Key,Val,State)}.
+
 add_blob(Key,Val,S = #state{blobs=Blobs}) ->
   case S#state.size2 < length(Blobs) of
     true ->
@@ -149,7 +307,7 @@ mk_blob(Key,Val) ->
   case is_binary(Val) of
     true -> Bin = Val,
             Type = binary;
-    false-> Bin = term_to_binary(Val),
+    false-> Bin = to_binary(Val),
             Type = term
   end,
   #blob{key=Key,
@@ -177,7 +335,7 @@ boff_f(#blob{key=Key,size=Size},T = #tmp{eof=Eof,len=Len,recs=Recs})->
   T#tmp{eof=Eof+Size,recs=Recs++[{Key,Eof}],len=Len+1,max=Key}.
 
 leaf_disk_format(T) ->
-  term_to_binary({T#tmp.len,T#tmp.recs}).
+  to_binary({T#tmp.len,T#tmp.recs}).
 
 mk_node(Nodes,Eof) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
@@ -196,20 +354,163 @@ noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
   T#tmp{len=Len+1,max=Max,recs=Recs++[{Pos,Min}]}.
 
 int_disk_format(T) ->
-  term_to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
 
-flush_cache(S) ->
-  io:fwrite("FLUSHING:~n~p~n",[[form(I)||I<-S#state.cache]]),
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% file ops
+
+-define(TYPE_BYTES, 1).
+-define(SIZE_BYTES, 4).
+-define(SIZE_BITS, 32).
+-define(PAD_BYTES,(?SIZE_BYTES+?TYPE_BYTES)).
+
+-define(TYPE_NODE,   <<1>>).
+-define(TYPE_BLOB,   <<2>>).
+-define(TYPE_BINARY, <<3>>).
+-define(TYPE_TERM,   <<4>>).
+
+do_open_bulk(Tab) ->
+  file:delete(filename(Tab)),
+  FD = do_open(Tab),
+  write(FD,[#header{}]),
+  FD.
+
+do_open_normal(Tab) ->
+  file:delete(filename(Tab)),
+  FD = do_open(Tab),
+  write(FD,[#header{}]),
+  FD.
+
+do_open(Tab) ->
+  {ok,FD} = file:open(filename(Tab),[read,append,binary,raw]),
+  FD.
+
+flush_cache(S = #state{fd=FD,cache=Cache}) ->
+  io:fwrite("FLUSHING:~n~p~n",[S#state.cache]),
+  write(FD,Cache),
   S#state{cache=[]}.
 
-form(N = #blob{}) -> wrap(blob,N);
-form(N = #node{}) -> [{T,unroll_bin(V)}||{T,V}<-wrap(node,N)].
+filename(Tab) ->
+  atom_to_list(Tab).
 
-wrap(RecName,Rec) -> 
-  lists:zip(rec_info(RecName),tl(tuple_to_list(Rec))).
+regname(Tab) ->
+  list_to_atom("abets_"++atom_to_list(Tab)).
 
-unroll_bin(B) when is_binary(B) -> binary_to_term(B);
-unroll_bin(X) -> X.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% disk format
 
-rec_info(node) -> record_info(fields,node);
-rec_info(blob) -> record_info(fields,blob).
+get_bin(#header{bin=Bin}) -> Bin;
+get_bin(#node{bin=Bin}) -> Bin;
+get_bin(#blob{bin=Bin}) -> Bin.
+
+type(#node{})             -> ?TYPE_NODE;
+type(#blob{})             -> ?TYPE_BLOB;
+type(#header{})           -> ?TYPE_BINARY;
+type(B) when is_binary(B) -> ?TYPE_BINARY;
+type(_)                   -> ?TYPE_TERM.
+
+read_blob_bw(eof,State) -> read_blob_bw(eof(State#state.fd),State);
+read_blob_bw(End,#state{fd=FD,block_size=BSIZE}) ->
+  {Ptr,Size,Bin} = read(FD,erlang:max(0,End-BSIZE),End),
+  [exit({bin_error1,{Size}}) || Size < ?TYPE_BYTES+?SIZE_BYTES],
+  Off = Size-?TYPE_BYTES-?SIZE_BYTES,
+  <<_:Off/binary,Type:?TYPE_BYTES/binary,BS:?SIZE_BITS/integer>> = Bin,
+  [exit({bin_error2,{Size,BS}}) || Size < BS+(?PAD_BYTES+?PAD_BYTES)],
+  Of = Size-BS-(?PAD_BYTES+?PAD_BYTES),
+  <<_:Of/binary,_:?PAD_BYTES/binary,BT:BS/binary,_:?PAD_BYTES/binary>> = Bin,
+  [exit({bin_error3,{Size,BS}}) || Ptr+Of =/= End-(BS+?PAD_BYTES+?PAD_BYTES)],
+  {unpack(Type,BT),Ptr+Of}.
+
+
+read_blob_fw(Beg,#state{fd=FD,block_size=BSIZE}) ->
+  {Beg,Size,Bin} = read(FD,Beg,Beg+BSIZE),
+  [exit({blob_error,{Size}}) || Size < ?PAD_BYTES],
+  <<Sz:?SIZE_BITS/integer,Type:?TYPE_BYTES/binary,_/binary>> = Bin,
+  [exit({blob_error,{Size,Sz}}) || Size < Sz+?PAD_BYTES],
+  <<_:?PAD_BYTES/binary,BT:Sz/binary,_/binary>> = Bin,
+  {unpack(Type,BT),Beg}.
+
+write(FD,IOlist) ->
+  ok = file:write(FD,[wrap(E) || E <- IOlist]),
+%  file:sync(FD),
+  ok.
+
+wrap(Rec) ->
+  Type = type(Rec),
+  Binary = get_bin(Rec),
+  BS = byte_size(Binary),
+  Sz = <<BS:?SIZE_BITS/integer>>,
+  [Sz,Type,Binary,Type,Sz].
+
+read(FD,Beg,End) ->
+  [exit({read_error,{Beg}}) || Beg < 0],
+  [exit({read_error,{Beg,End}}) || End < Beg],
+  {ok,Bin} = file:pread(FD,Beg,End-Beg),
+  Size = byte_size(Bin),
+  {Beg,Size,Bin}.
+%  put(read_cache,{Beg,Size,Bin}).
+
+unpack(Type,B) ->
+  case Type of
+    ?TYPE_BINARY -> B;
+    _            -> binary_to_term(B)
+  end.
+
+to_binary(Term) ->
+  term_to_binary(Term,[{compressed,3},{minor_version,1}]).
+
+eof(FD) ->
+  {ok,Pos} = file:position(FD,eof),
+  Pos.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% ad-hoc unit testing
+
+unit_bulk() ->
+  catch destroy(foo),
+  new(foo,[bulk]),
+  [bulk(foo,N,{mange,N})||N<-[10,11,12,13,14,15,16,17,18,19,20,21,22]],
+  bulk(foo,commit).
+
+unit_bulk_small() ->
+  catch destroy(foo),
+  new(foo,[bulk]),
+  [bulk(foo,N,{mange,N})||N<-[10,11,12,13]],
+  bulk(foo,commit).
+
+unit() ->
+  unit(10000).
+
+unit(N) when is_integer(N) -> unit(shuffle(lists:seq(1,N)));
+unit(L) when is_list(L) ->
+  catch destroy(foo),
+  io:fwrite("length: ~p~n",[length(L)]),
+  new(foo),
+  [insert(foo,E,{tobbe,E}) || E <- L],
+  try length([{tobbe,E}=lookup(foo,E) || E <- L])
+  catch _:R -> R
+  end.
+
+shuffle(L) ->
+  [V||{_,V}<-lists:sort([{random:uniform(),E}||E<-L])].
+
+wunit() -> wunit(10000).
+
+wunit(N) when is_integer(N) -> wunit(shuffle(lists:seq(1,N)));
+wunit(L) when is_list(L) ->
+  catch destroy(foo),
+  new(foo),
+  try [wunit(E,L) || E <- L],length(L)
+  catch _:R -> R
+  after close(foo)
+  end.
+
+wunit(E,L) ->
+  insert(foo,E,{tobbe,E}),
+  Ss = sub(L,E),
+  try length([{tobbe,I}=lookup(foo,I) || I <- Ss])
+  catch _:R -> exit({R,E,Ss})
+  end.
+
+sub([E|_],E) -> [E];
+sub([H|T],E) -> [H|sub(T,E)].
