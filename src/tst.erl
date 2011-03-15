@@ -29,8 +29,6 @@
          , first/1
          , next/2]).
 
-
-
 -define(SIZE,4).
 
 -record(state,
@@ -162,8 +160,8 @@ safer(What,State) ->
   catch C:R -> exit({C,R,erlang:get_stacktrace()})
   end.
 
-%% do_safer({lookup,Key},State)     -> {do_lookup(Key,State#state.fd),State};
 %% do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
+do_safer({lookup,Key},State)     -> {do_lookup(Key,State),State};
 do_safer({bulk,Key,Val},State)   -> do_bulk(insert,Key,Val,State);
 do_safer({bulk,commit},State)    -> do_bulk(commit,'','',State);
 do_safer({decompose,N},State)    -> {do_decompose(N,State),State}.
@@ -192,6 +190,12 @@ decomp(_,_,{Term,0},O)  -> [{0,Term}|O];
 decomp(State,N,{Term,Pos},O)  ->
   decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Term}|O]).
 
+do_lookup(Key,State) ->
+  find(Key,read_blob_bw(eof,State),State).
+
+find(Key,{{Type,Node},_},State) ->
+  %%placeholder
+  {Key,Type,Node,State}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -459,8 +463,10 @@ read(FD,Beg,End) ->
 
 unpack(Type,B) ->
   case Type of
-    ?TYPE_BINARY -> B;
-    _            -> binary_to_term(B)
+    ?TYPE_NODE   -> {node,binary_to_term(B)};
+    ?TYPE_BLOB   -> {blob,binary_to_term(B)};
+    ?TYPE_BINARY -> {binary,B};
+    ?TYPE_TERM   -> {term,binary_to_term(B)}
   end.
 
 to_binary(Term) ->
