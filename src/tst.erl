@@ -36,7 +36,7 @@
 -record(state,
         {len=?SIZE,
          len2=?SIZE*2,
-         eof=0,
+         eof=header_size(),
          block_size=2621,
          name,
          fd,
@@ -313,7 +313,7 @@ mk_blob(Key,Val) ->
   #blob{key=Key,
         data=Val,
         bin=Bin,
-        size=byte_size(Bin),
+        size=byte_size(Bin)+pad_size(),
         type=Type}.
 
 -record(tmp,{eof,recs,len=0,min,max,zp}).
@@ -399,6 +399,9 @@ regname(Tab) ->
 
 pad_size() ->
   ?PAD_BYTES+?PAD_BYTES.
+
+header_size() ->
+  byte_size((#header{})#header.bin)+pad_size().
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
