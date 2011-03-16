@@ -34,16 +34,18 @@
 -record(state,
         {len=?SIZE,
          len2=?SIZE*2,
-         eof=header_size(),
+         eof=0,
          block_size=2621,
          name,
          fd,
+         mode,
          cache=[],
          blobs=[],
          nodes=[[]]}).
 
 -record(header,
-        {bin = <<"ABETS v1">>}).
+        {bin,
+         size}).
 
 -record(blob,
         {key,
@@ -53,7 +55,8 @@
          bin}).
 
 -record(node,
-        {pos,
+        {type,
+         pos,
          size=0,
          length=0,
          min_key,
@@ -80,7 +83,7 @@ new(Tab,Opts) ->
   end.
 
 open(Tab) ->
-  do_new(Tab,open).
+  do_new(Tab,normal).
 
 insert(Tab,Key,Val) ->
   call(Tab,{insert,Key,Val}).
@@ -132,12 +135,8 @@ assert(Tab) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% gen_server callbacks
 
-init([open,Tab]) ->
-  {ok,do_init(Tab,do_open(Tab))};
-init([bulk,Tab]) ->
-  {ok,do_init(Tab,do_open_bulk(Tab))};
-init([create,Tab]) ->
-  {ok,do_init(Tab,do_open_normal(Tab))}.
+init([OpenMode,Name]) ->
+  {ok,do_open(OpenMode,#state{name=Name})}.
 
 terminate(normal,[]) ->
   ok;
@@ -173,10 +172,6 @@ do_new(Tab,How) ->
   catch _:{no_such_table,Tab} ->
       gen_server:start({local,regname(Tab)},?MODULE,[How,Tab],[])
   end.
-
-do_init(Tab,FD) ->
-  #state{name = Tab
-         , fd = FD}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% B+tree logic
@@ -228,7 +223,7 @@ finalize(S0 = #state{cache=[],blobs=Blobs}) ->
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
   case length(Ns) =< S#state.len of
     true ->
-      Root = mk_node(Ns,Eof),
+      Root = mk_root(Ns,Eof),
       NewEof = Root#node.pos+Root#node.size,
       S#state{eof=NewEof,cache=Cache++[Root],nodes=[]};
     false->
@@ -307,6 +302,54 @@ chk_nodes([N0s|Nss],{Ns,Cache,Eof},C={S,S2}) ->
 add_node(N,[]) -> [[N]];
 add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
 
+-record(tmp,{eof,recs,len=0,min,max,zp}).
+
+mk_root(Nodes,Eof) ->
+  T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
+  Bin = disk_format_root(T),
+  #node{type=root,
+        length=T#tmp.len,
+        size=byte_size(Bin)+pad_size(),
+        min_key=T#tmp.min,
+        max_key=T#tmp.max,
+        pos=Eof,
+        zero_pos=T#tmp.zp,
+        bin=Bin}.
+
+mk_node(Nodes,Eof) ->
+  T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
+  Bin = disk_format_int(T),
+  #node{type=internal,
+        length=T#tmp.len,
+        size=byte_size(Bin)+pad_size(),
+        min_key=T#tmp.min,
+        max_key=T#tmp.max,
+        pos=Eof,
+        zero_pos=T#tmp.zp,
+        bin=Bin}.
+
+noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
+  T#tmp{zp=Pos,len=1,min=Min,max=Max,recs=[]};
+noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
+  T#tmp{len=Len+1,max=Max,recs=Recs++[{Pos,Min}]}.
+
+mk_leaf(Blobs,Eof) ->
+  T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
+  Bin = disk_format_leaf(T),
+  #node{type=leaf,
+        length=T#tmp.len,
+        size=byte_size(Bin)+pad_size(),
+        min_key=T#tmp.min,
+        max_key=T#tmp.max,
+        pos=T#tmp.eof,
+        zero_pos=leaf,
+        bin=Bin}.
+
+boff_f(#blob{key=Key,size=Size},T = #tmp{len=0,eof=Eof}) ->
+  T#tmp{eof=Eof+Size,recs=[{Key,Eof}],len=1,min=Key,max=Key};
+boff_f(#blob{key=Key,size=Size},T = #tmp{eof=Eof,len=Len,recs=Recs})->
+  T#tmp{eof=Eof+Size,recs=Recs++[{Key,Eof}],len=Len+1,max=Key}.
+
 mk_blob(Key,Val) ->
   case is_binary(Val) of
     true -> Bin = Val,
@@ -320,45 +363,10 @@ mk_blob(Key,Val) ->
         size=byte_size(Bin)+pad_size(),
         type=Type}.
 
--record(tmp,{eof,recs,len=0,min,max,zp}).
-
-mk_leaf(Blobs,Eof) ->
-  T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
-  Bin = leaf_disk_format(T),
-  #node{length=T#tmp.len,
-        size=byte_size(Bin)+pad_size(),
-        min_key=T#tmp.min,
-        max_key=T#tmp.max,
-        pos=T#tmp.eof,
-        zero_pos=leaf,
-        bin=Bin}.
-
-boff_f(#blob{key=Key,size=Size},T = #tmp{len=0,eof=Eof}) ->
-  T#tmp{eof=Eof+Size,recs=[{Key,Eof}],len=1,min=Key,max=Key};
-boff_f(#blob{key=Key,size=Size},T = #tmp{eof=Eof,len=Len,recs=Recs})->
-  T#tmp{eof=Eof+Size,recs=Recs++[{Key,Eof}],len=Len+1,max=Key}.
-
-leaf_disk_format(T) ->
-  to_binary({T#tmp.len,T#tmp.recs}).
-
-mk_node(Nodes,Eof) ->
-  T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  Bin = int_disk_format(T),
-  #node{length=T#tmp.len,
-        size=byte_size(Bin)+pad_size(),
-        min_key=T#tmp.min,
-        max_key=T#tmp.max,
-        pos=Eof,
-        zero_pos=T#tmp.zp,
-        bin=Bin}.
-
-noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
-  T#tmp{zp=Pos,len=1,min=Min,max=Max,recs=[]};
-noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
-  T#tmp{len=Len+1,max=Max,recs=Recs++[{Pos,Min}]}.
-
-int_disk_format(T) ->
-  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+mk_header(_State) ->
+  Bin = term_to_binary("ABETS v1"),
+  #header{bin = Bin,
+          size=byte_size(Bin)+pad_size()}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -369,26 +377,26 @@ int_disk_format(T) ->
 -define(SIZE_BITS, 32).
 -define(PAD_BYTES,(?SIZE_BYTES+?TYPE_BYTES)).
 
--define(TYPE_NODE,   <<1>>).
--define(TYPE_BLOB,   <<2>>).
--define(TYPE_BINARY, <<3>>).
--define(TYPE_TERM,   <<4>>).
+-define(TYPE_LEAF_NODE , <<1>>).
+-define(TYPE_INT_NODE  , <<2>>).
+-define(TYPE_ROOT_NODE , <<3>>).
+-define(TYPE_BLOB      , <<4>>).
+-define(TYPE_HEADER    , <<5>>).
 
-do_open_bulk(Tab) ->
-  file:delete(filename(Tab)),
-  FD = do_open(Tab),
-  write(FD,[#header{}]),
-  FD.
+do_open(OpenMode,State) ->
+  maybe_delete(OpenMode,State),
+  {ok,FD} = file:open(filename(State#state.name),[read,append,binary,raw]),
+  Header = mk_header(State),
+  write(FD,[Header]),
+  State#state{mode=fill_mode(OpenMode),
+              eof=Header#header.size,
+              fd=FD}.
 
-do_open_normal(Tab) ->
-  file:delete(filename(Tab)),
-  FD = do_open(Tab),
-  write(FD,[#header{}]),
-  FD.
+fill_mode(bulk) -> bulk;
+fill_mode(_) -> normal.
 
-do_open(Tab) ->
-  {ok,FD} = file:open(filename(Tab),[read,append,binary,raw]),
-  FD.
+maybe_delete(normal,_) -> ok;
+maybe_delete(_,#state{name=Name}) -> file:delete(filename(Name)).
 
 flush_cache(S = #state{fd=FD,cache=Cache}) ->
   io:fwrite("FLUSHING:~n~p~n",[S#state.cache]),
@@ -404,21 +412,17 @@ regname(Tab) ->
 pad_size() ->
   ?PAD_BYTES+?PAD_BYTES.
 
-header_size() ->
-  byte_size((#header{})#header.bin)+pad_size().
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
 
-get_bin(#header{bin=Bin}) -> Bin;
-get_bin(#node{bin=Bin}) -> Bin;
-get_bin(#blob{bin=Bin}) -> Bin.
+disk_format_leaf(T) ->
+  to_binary({T#tmp.len,T#tmp.recs}).
 
-type(#node{})             -> ?TYPE_NODE;
-type(#blob{})             -> ?TYPE_BLOB;
-type(#header{})           -> ?TYPE_BINARY;
-type(B) when is_binary(B) -> ?TYPE_BINARY;
-type(_)                   -> ?TYPE_TERM.
+disk_format_int(T) ->
+  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+
+disk_format_root(T) ->
+  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
 
 read_blob_bw(eof,State) -> read_blob_bw(eof(State#state.fd),State);
 read_blob_bw(End,#state{fd=FD,block_size=BSIZE}) ->
@@ -430,7 +434,7 @@ read_blob_bw(End,#state{fd=FD,block_size=BSIZE}) ->
   Of = Size-BS-(?PAD_BYTES+?PAD_BYTES),
   <<_:Of/binary,_:?PAD_BYTES/binary,BT:BS/binary,_:?PAD_BYTES/binary>> = Bin,
   [exit({bin_error3,{Size,BS}}) || Ptr+Of =/= End-(BS+?PAD_BYTES+?PAD_BYTES)],
-  {unpack(Type,BT),Ptr+Of}.
+  {unwrap(Type,BT),Ptr+Of}.
 
 
 read_blob_fw(Beg,#state{fd=FD,block_size=BSIZE}) ->
@@ -439,12 +443,19 @@ read_blob_fw(Beg,#state{fd=FD,block_size=BSIZE}) ->
   <<Sz:?SIZE_BITS/integer,Type:?TYPE_BYTES/binary,_/binary>> = Bin,
   [exit({blob_error,{Size,Sz}}) || Size < Sz+?PAD_BYTES],
   <<_:?PAD_BYTES/binary,BT:Sz/binary,_/binary>> = Bin,
-  {unpack(Type,BT),Beg}.
+  {unwrap(Type,BT),Beg}.
 
 write(FD,IOlist) ->
   ok = file:write(FD,[wrap(E) || E <- IOlist]),
 %  file:sync(FD),
   ok.
+
+read(FD,Beg,End) ->
+  [exit({read_error,{Beg}}) || Beg < 0],
+  [exit({read_error,{Beg,End}}) || End < Beg],
+  {ok,Bin} = file:pread(FD,Beg,End-Beg),
+  Size = byte_size(Bin),
+  {Beg,Size,Bin}.
 
 wrap(Rec) ->
   Type = type(Rec),
@@ -453,20 +464,13 @@ wrap(Rec) ->
   Sz = <<BS:?SIZE_BITS/integer>>,
   [Sz,Type,Binary,Type,Sz].
 
-read(FD,Beg,End) ->
-  [exit({read_error,{Beg}}) || Beg < 0],
-  [exit({read_error,{Beg,End}}) || End < Beg],
-  {ok,Bin} = file:pread(FD,Beg,End-Beg),
-  Size = byte_size(Bin),
-  {Beg,Size,Bin}.
-%  put(read_cache,{Beg,Size,Bin}).
-
-unpack(Type,B) ->
+unwrap(Type,B) ->
   case Type of
-    ?TYPE_NODE   -> {node,binary_to_term(B)};
-    ?TYPE_BLOB   -> {blob,binary_to_term(B)};
-    ?TYPE_BINARY -> {binary,B};
-    ?TYPE_TERM   -> {term,binary_to_term(B)}
+    ?TYPE_LEAF_NODE -> {node,binary_to_term(B)};
+    ?TYPE_INT_NODE  -> {node,binary_to_term(B)};
+    ?TYPE_ROOT_NODE -> {node,binary_to_term(B)};
+    ?TYPE_BLOB      -> {blob,binary_to_term(B)};
+    ?TYPE_HEADER    -> {header,binary_to_term(B)}
   end.
 
 to_binary(Term) ->
@@ -475,6 +479,17 @@ to_binary(Term) ->
 eof(FD) ->
   {ok,Pos} = file:position(FD,eof),
   Pos.
+
+get_bin(#header{bin=Bin}) -> Bin;
+get_bin(#node{bin=Bin})   -> Bin;
+get_bin(#blob{bin=Bin})   -> Bin.
+
+type(#node{type=leaf})    -> ?TYPE_LEAF_NODE;
+type(#node{type=internal})-> ?TYPE_INT_NODE;
+type(#node{type=root})    -> ?TYPE_ROOT_NODE;
+type(#blob{})             -> ?TYPE_BLOB;
+type(#header{})           -> ?TYPE_HEADER.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ad-hoc unit testing
 
