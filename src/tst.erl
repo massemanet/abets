@@ -50,7 +50,6 @@
 -record(blob,
         {key,
          data,
-         type=term,
          size,
          bin}).
 
@@ -62,6 +61,7 @@
          min_key,
          max_key,
          zero_pos=0,
+         recs=[],
          bin}).
 
 tree(L) ->
@@ -98,7 +98,7 @@ delete(Tab, Key) ->
   call(Tab,{delete,Key}).
 
 lookup(Tab, Key) ->
-  try {Res} = call(Tab,{lookup,Key}),
+  try Res = call(Tab,{lookup,Key}),
        Res
   catch _:{badmatch,X} ->
       throw(X)
@@ -306,7 +306,7 @@ add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
 
 mk_root(Nodes,Eof) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  Bin = disk_format_root(T),
+  Bin = to_disk_format_root(T),
   #node{type=root,
         length=T#tmp.len,
         size=byte_size(Bin)+pad_size(),
@@ -314,11 +314,12 @@ mk_root(Nodes,Eof) ->
         max_key=T#tmp.max,
         pos=Eof,
         zero_pos=T#tmp.zp,
+        recs=T#tmp.recs,
         bin=Bin}.
 
 mk_node(Nodes,Eof) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  Bin = disk_format_int(T),
+  Bin = to_disk_format_int(T),
   #node{type=internal,
         length=T#tmp.len,
         size=byte_size(Bin)+pad_size(),
@@ -326,6 +327,7 @@ mk_node(Nodes,Eof) ->
         max_key=T#tmp.max,
         pos=Eof,
         zero_pos=T#tmp.zp,
+        recs=T#tmp.recs,
         bin=Bin}.
 
 noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
@@ -335,7 +337,7 @@ noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
 
 mk_leaf(Blobs,Eof) ->
   T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
-  Bin = disk_format_leaf(T),
+  Bin = to_disk_format_leaf(T),
   #node{type=leaf,
         length=T#tmp.len,
         size=byte_size(Bin)+pad_size(),
@@ -343,6 +345,7 @@ mk_leaf(Blobs,Eof) ->
         max_key=T#tmp.max,
         pos=T#tmp.eof,
         zero_pos=leaf,
+        recs=T#tmp.recs,
         bin=Bin}.
 
 boff_f(#blob{key=Key,size=Size},T = #tmp{len=0,eof=Eof}) ->
@@ -351,20 +354,14 @@ boff_f(#blob{key=Key,size=Size},T = #tmp{eof=Eof,len=Len,recs=Recs})->
   T#tmp{eof=Eof+Size,recs=Recs++[{Key,Eof}],len=Len+1,max=Key}.
 
 mk_blob(Key,Val) ->
-  case is_binary(Val) of
-    true -> Bin = Val,
-            Type = binary;
-    false-> Bin = to_binary(Val),
-            Type = term
-  end,
+  Bin = to_disk_format_blob(Val),
   #blob{key=Key,
         data=Val,
         bin=Bin,
-        size=byte_size(Bin)+pad_size(),
-        type=Type}.
+        size=byte_size(Bin)+pad_size()}.
 
-mk_header(_State) ->
-  Bin = term_to_binary("ABETS v1"),
+mk_header(State) ->
+  Bin = to_disk_format_header(State),
   #header{bin = Bin,
           size=byte_size(Bin)+pad_size()}.
 
@@ -382,6 +379,8 @@ mk_header(_State) ->
 -define(TYPE_ROOT_NODE , <<3>>).
 -define(TYPE_BLOB      , <<4>>).
 -define(TYPE_HEADER    , <<5>>).
+-define(TYPE_TERM      , 6).
+-define(TYPE_BIN       , 7).
 
 do_open(OpenMode,State) ->
   maybe_delete(OpenMode,State),
@@ -414,15 +413,6 @@ pad_size() ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
-
-disk_format_leaf(T) ->
-  to_binary({T#tmp.len,T#tmp.recs}).
-
-disk_format_int(T) ->
-  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
-
-disk_format_root(T) ->
-  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
 
 read_blob_bw(eof,State) -> read_blob_bw(eof(State#state.fd),State);
 read_blob_bw(End,#state{fd=FD,block_size=BSIZE}) ->
@@ -466,12 +456,62 @@ wrap(Rec) ->
 
 unwrap(Type,B) ->
   case Type of
-    ?TYPE_LEAF_NODE -> {node,binary_to_term(B)};
-    ?TYPE_INT_NODE  -> {node,binary_to_term(B)};
-    ?TYPE_ROOT_NODE -> {node,binary_to_term(B)};
-    ?TYPE_BLOB      -> {blob,binary_to_term(B)};
-    ?TYPE_HEADER    -> {header,binary_to_term(B)}
+    ?TYPE_LEAF_NODE -> {node,from_disk_format_leaf(B)};
+    ?TYPE_INT_NODE  -> {node,from_disk_format_int(B)};
+    ?TYPE_ROOT_NODE -> {node,from_disk_format_root(B)};
+    ?TYPE_BLOB      -> {blob,from_disk_format_blob(B)};
+    ?TYPE_HEADER    -> {header,from_disk_format_header(B)}
   end.
+
+from_disk_format_blob(<<?TYPE_BIN:8/integer,Bin/binary>>) ->
+  Bin;
+from_disk_format_blob(<<?TYPE_TERM:8/integer,Bin/binary>>) ->
+  binary_to_term(Bin).
+
+to_disk_format_blob(Bin) when is_binary(Bin) ->
+  <<?TYPE_BIN:8/integer,Bin/binary>>;
+to_disk_format_blob(Val) ->
+  Bin=to_binary(Val),
+  <<?TYPE_TERM:8/integer,Bin/binary>>.
+
+from_disk_format_leaf(Bin) ->
+  {Len,Recs} = binary_to_term(Bin),
+  #node{type=leaf,
+        length=Len,
+        recs=Recs}.
+
+to_disk_format_leaf(T) ->
+  to_binary({T#tmp.len,T#tmp.recs}).
+
+from_disk_format_int(Bin) ->
+  {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
+  #node{type=internal,
+        length=Len,
+        min_key=Min,
+        max_key=Max,
+        zero_pos=Zp,
+        recs=Recs}.
+
+to_disk_format_int(T) ->
+  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+
+from_disk_format_root(Bin) ->
+  {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
+  #node{type=root,
+        length=Len,
+        min_key=Min,
+        max_key=Max,
+        zero_pos=Zp,
+        recs=Recs}.
+
+to_disk_format_root(T) ->
+  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+
+from_disk_format_header(Bin) ->
+  binary_to_term(Bin).
+
+to_disk_format_header(_State) ->
+  term_to_binary("ABETS v1").
 
 to_binary(Term) ->
   term_to_binary(Term,[{compressed,3},{minor_version,1}]).
