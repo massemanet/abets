@@ -284,7 +284,7 @@ do_bulk(insert,Key,Val,State)->
   {ok,add_blob(Key,Val,State)}.
 
 add_blob(Key,Val,S = #state{blobs=Blobs}) ->
-  case S#state.len2 < length(Blobs) of
+  case S#state.len2 =< length(Blobs) of
     true ->
       {BlobsH,BlobsT} = lists:split(S#state.len,Blobs),
       NewLeaf = mk_leaf(BlobsH,S#state.eof),
