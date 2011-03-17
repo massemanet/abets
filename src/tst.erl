@@ -197,13 +197,23 @@ do_lookup(Key,State) ->
     _:R -> {not_found,Key,R}
   end.
 
-find(Key,#node{type=root,zero_pos=Zp,recs=[]},State) ->
-  find(Key,read_blob_fw(Zp,State),State);
-find(Key,#node{type=internal,zero_pos=Zp,recs=[]},State) ->
-  find(Key,read_blob_fw(Zp,State),State);
 find(Key,#node{type=leaf,recs=Recs},State) ->
   {value,{Key,Pos}} = lists:keysearch(Key,1,Recs),
-  read_blob_fw(Pos,State).
+  read_blob_fw(Pos,State);
+find(Key,#node{zero_pos=Zp,recs=[]},State) ->
+  find(Key,read_blob_fw(Zp,State),State);
+find(Key,#node{zero_pos=Zp,recs=[{K0,_}|_]},State) when Key < K0 ->
+  find(Key,read_blob_fw(Zp,State),State);
+find(Key,#node{recs=Recs},State) ->
+  find(Key,read_blob_fw(find(Key,Recs),State),State).
+
+find(Key,[{K0,P0},{K1,P1}|Recs]) ->
+  case K0 =< Key andalso Key < K1 of
+    true -> P0;
+    false-> find(Key,[{K1,P1}|Recs])
+  end;
+find(_,[{_,P0}]) ->
+  P0.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -346,7 +356,7 @@ mk_node(Nodes,Eof) ->
 noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
   T#tmp{zp=Pos,len=1,min=Min,max=Max,recs=[]};
 noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
-  T#tmp{len=Len+1,max=Max,recs=Recs++[{Pos,Min}]}.
+  T#tmp{len=Len+1,max=Max,recs=Recs++[{Min,Pos}]}.
 
 mk_leaf(Blobs,Eof) ->
   T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
