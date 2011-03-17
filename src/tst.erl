@@ -45,11 +45,14 @@
 
 -record(header,
         {bin,
-         size}).
+         pos,
+         size,
+         data}).
 
 -record(blob,
         {key,
          data,
+         pos,
          size,
          bin}).
 
@@ -98,10 +101,9 @@ delete(Tab, Key) ->
   call(Tab,{delete,Key}).
 
 lookup(Tab, Key) ->
-  try Res = call(Tab,{lookup,Key}),
-       Res
-  catch _:{badmatch,X} ->
-      throw(X)
+  case call(Tab,{lookup,Key}) of
+    {Res} -> Res;
+    Error -> exit(Error)
   end.
 
 first(Tab) ->
@@ -180,17 +182,28 @@ do_new(Tab,How) ->
 do_decompose(N,State) ->
   decomp(State,N,read_blob_bw(eof,State),[]).
 
-decomp(_,0,{Term,Pos},O) -> [{Pos,Term}|O];
-decomp(_,_,{Term,0},O)  -> [{0,Term}|O];
-decomp(State,N,{Term,Pos},O)  ->
-  decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Term}|O]).
+decomp(State,N,Rec,O)  ->
+  Pos = get_pos(Rec),
+  case N =:= 0 orelse Pos =:= 0 of
+    true -> [{Pos,Rec}|O];
+    false-> decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Rec}|O])
+  end.
 
 do_lookup(Key,State) ->
-  find(Key,read_blob_bw(eof,State),State).
+  try
+    #blob{data=Data} = find(Key,read_blob_bw(eof,State),State),
+    {Data}
+  catch
+    _:R -> {not_found,Key,R}
+  end.
 
-find(Key,{{Type,Node},_},State) ->
-  %%placeholder
-  {Key,Type,Node,State}.
+find(Key,#node{type=root,zero_pos=Zp,recs=[]},State) ->
+  find(Key,read_blob_fw(Zp,State),State);
+find(Key,#node{type=internal,zero_pos=Zp,recs=[]},State) ->
+  find(Key,read_blob_fw(Zp,State),State);
+find(Key,#node{type=leaf,recs=Recs},State) ->
+  {value,{Key,Pos}} = lists:keysearch(Key,1,Recs),
+  read_blob_fw(Pos,State).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -360,9 +373,11 @@ mk_blob(Key,Val) ->
         bin=Bin,
         size=byte_size(Bin)+pad_size()}.
 
-mk_header(State) ->
-  Bin = to_disk_format_header(State),
+mk_header(_State) ->
+  Data = "ABETS v1",
+  Bin = to_disk_format_header(Data),
   #header{bin = Bin,
+          data = Data,
           size=byte_size(Bin)+pad_size()}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -424,7 +439,7 @@ read_blob_bw(End,#state{fd=FD,block_size=BSIZE}) ->
   Of = Size-BS-(?PAD_BYTES+?PAD_BYTES),
   <<_:Of/binary,_:?PAD_BYTES/binary,BT:BS/binary,_:?PAD_BYTES/binary>> = Bin,
   [exit({bin_error3,{Size,BS}}) || Ptr+Of =/= End-(BS+?PAD_BYTES+?PAD_BYTES)],
-  {unwrap(Type,BT),Ptr+Of}.
+  unwrap(Type,BT,Ptr+Of).
 
 
 read_blob_fw(Beg,#state{fd=FD,block_size=BSIZE}) ->
@@ -433,7 +448,7 @@ read_blob_fw(Beg,#state{fd=FD,block_size=BSIZE}) ->
   <<Sz:?SIZE_BITS/integer,Type:?TYPE_BYTES/binary,_/binary>> = Bin,
   [exit({blob_error,{Size,Sz}}) || Size < Sz+?PAD_BYTES],
   <<_:?PAD_BYTES/binary,BT:Sz/binary,_/binary>> = Bin,
-  {unwrap(Type,BT),Beg}.
+  unwrap(Type,BT,Beg).
 
 write(FD,IOlist) ->
   ok = file:write(FD,[wrap(E) || E <- IOlist]),
@@ -454,19 +469,19 @@ wrap(Rec) ->
   Sz = <<BS:?SIZE_BITS/integer>>,
   [Sz,Type,Binary,Type,Sz].
 
-unwrap(Type,B) ->
+unwrap(Type,B,Pos) ->
   case Type of
-    ?TYPE_LEAF_NODE -> {node,from_disk_format_leaf(B)};
-    ?TYPE_INT_NODE  -> {node,from_disk_format_int(B)};
-    ?TYPE_ROOT_NODE -> {node,from_disk_format_root(B)};
-    ?TYPE_BLOB      -> {blob,from_disk_format_blob(B)};
-    ?TYPE_HEADER    -> {header,from_disk_format_header(B)}
+    ?TYPE_LEAF_NODE -> from_disk_format_leaf(B,Pos);
+    ?TYPE_INT_NODE  -> from_disk_format_int(B,Pos);
+    ?TYPE_ROOT_NODE -> from_disk_format_root(B,Pos);
+    ?TYPE_BLOB      -> from_disk_format_blob(B,Pos);
+    ?TYPE_HEADER    -> from_disk_format_header(B,Pos)
   end.
 
-from_disk_format_blob(<<?TYPE_BIN:8/integer,Bin/binary>>) ->
-  Bin;
-from_disk_format_blob(<<?TYPE_TERM:8/integer,Bin/binary>>) ->
-  binary_to_term(Bin).
+from_disk_format_blob(<<?TYPE_BIN:8/integer,Bin/binary>>,Pos) ->
+  #blob{data=Bin,pos=Pos};
+from_disk_format_blob(<<?TYPE_TERM:8/integer,Bin/binary>>,Pos) ->
+  #blob{data=binary_to_term(Bin),pos=Pos}.
 
 to_disk_format_blob(Bin) when is_binary(Bin) ->
   <<?TYPE_BIN:8/integer,Bin/binary>>;
@@ -474,18 +489,20 @@ to_disk_format_blob(Val) ->
   Bin=to_binary(Val),
   <<?TYPE_TERM:8/integer,Bin/binary>>.
 
-from_disk_format_leaf(Bin) ->
+from_disk_format_leaf(Bin,Pos) ->
   {Len,Recs} = binary_to_term(Bin),
   #node{type=leaf,
+        pos=Pos,
         length=Len,
         recs=Recs}.
 
 to_disk_format_leaf(T) ->
   to_binary({T#tmp.len,T#tmp.recs}).
 
-from_disk_format_int(Bin) ->
+from_disk_format_int(Bin,Pos) ->
   {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
   #node{type=internal,
+        pos=Pos,
         length=Len,
         min_key=Min,
         max_key=Max,
@@ -495,9 +512,10 @@ from_disk_format_int(Bin) ->
 to_disk_format_int(T) ->
   to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
 
-from_disk_format_root(Bin) ->
+from_disk_format_root(Bin,Pos) ->
   {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
   #node{type=root,
+        pos=Pos,
         length=Len,
         min_key=Min,
         max_key=Max,
@@ -507,11 +525,12 @@ from_disk_format_root(Bin) ->
 to_disk_format_root(T) ->
   to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
 
-from_disk_format_header(Bin) ->
-  binary_to_term(Bin).
+from_disk_format_header(Bin,Pos) ->
+  #header{pos=Pos,
+          data=binary_to_term(Bin)}.
 
-to_disk_format_header(_State) ->
-  term_to_binary("ABETS v1").
+to_disk_format_header(Data) ->
+  term_to_binary(Data).
 
 to_binary(Term) ->
   term_to_binary(Term,[{compressed,3},{minor_version,1}]).
@@ -523,6 +542,10 @@ eof(FD) ->
 get_bin(#header{bin=Bin}) -> Bin;
 get_bin(#node{bin=Bin})   -> Bin;
 get_bin(#blob{bin=Bin})   -> Bin.
+
+get_pos(#header{pos=Pos}) -> Pos;
+get_pos(#node{pos=Pos})   -> Pos;
+get_pos(#blob{pos=Pos})   -> Pos.
 
 type(#node{type=leaf})    -> ?TYPE_LEAF_NODE;
 type(#node{type=internal})-> ?TYPE_INT_NODE;
