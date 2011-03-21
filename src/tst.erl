@@ -191,21 +191,29 @@ decomp(State,N,Rec,O)  ->
 
 do_lookup(Key,State) ->
   try
-    #blob{data=Data} = find(Key,read_blob_bw(eof,State),State),
+    [Leaf|_] = find_nodes(Key,State),
+    #blob{data=Data} = read_blob(Key,Leaf,State),
     {Data}
   catch
     _:R -> {not_found,Key,R}
   end.
 
-find(Key,#node{type=leaf,recs=Recs},State) ->
+read_blob(Key,#node{type=leaf,recs=Recs},State) ->
   {value,{Key,Pos}} = lists:keysearch(Key,1,Recs),
-  read_blob_fw(Pos,State);
-find(Key,#node{zero_pos=Zp,recs=[]},State) ->
-  find(Key,read_blob_fw(Zp,State),State);
-find(Key,#node{zero_pos=Zp,recs=[{K0,_}|_]},State) when Key < K0 ->
-  find(Key,read_blob_fw(Zp,State),State);
-find(Key,#node{recs=Recs},State) ->
-  find(Key,read_blob_fw(find(Key,Recs),State),State).
+  read_blob_fw(Pos,State).
+
+find_nodes(Key,State) ->
+  find_nodes(Key,read_blob_bw(eof,State),[],State).
+
+find_nodes(Key,N = #node{type=leaf},O,_) ->
+  [exit({no_leaf,Key}) || N#node.min_key =< Key, Key =< N#node.max_key],
+  [N|O];
+find_nodes(Key,N = #node{recs=[]},O,State) ->
+  find_nodes(Key,read_blob_fw(N#node.zero_pos,State),[N|O],State);
+find_nodes(Key,N = #node{recs=[{K0,_}|_]},O,State) when Key < K0 ->
+  find_nodes(Key,read_blob_fw(N#node.zero_pos,State),[N|O],State);
+find_nodes(Key,N = #node{recs=Recs},O,State) ->
+  find_nodes(Key,read_blob_fw(find(Key,Recs),State),[N|O],State).
 
 find(Key,[{K0,P0},{K1,P1}|Recs]) ->
   case K0 =< Key andalso Key < K1 of
