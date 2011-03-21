@@ -161,7 +161,7 @@ safer(What,State) ->
   catch C:R -> exit({C,R,erlang:get_stacktrace()})
   end.
 
-%% do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
+do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
 do_safer({lookup,Key},State)     -> {do_lookup(Key,State),State};
 do_safer({bulk,Key,Val},State)   -> do_bulk(insert,Key,Val,State);
 do_safer({bulk,commit},State)    -> do_bulk(commit,'','',State);
@@ -188,6 +188,9 @@ decomp(State,N,Rec,O)  ->
     true -> [{Pos,Rec}|O];
     false-> decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Rec}|O])
   end.
+
+do_insert(Key,Val,State) ->
+  {{Key,Val,State}}.
 
 do_lookup(Key,State) ->
   try
