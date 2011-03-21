@@ -27,6 +27,7 @@
          , lookup/2
          , bulk/2, bulk/3
          , first/1
+         , last/1
          , next/2]).
 
 -define(SIZE,4).
@@ -107,7 +108,10 @@ lookup(Tab, Key) ->
   end.
 
 first(Tab) ->
-  call(Tab,first).
+  call(Tab,{first}).
+
+last(Tab) ->
+  call(Tab,{last}).
 
 next(Tab, Key) ->
   call(Tab,{next,Key}).
@@ -161,6 +165,8 @@ safer(What,State) ->
   catch C:R -> exit({C,R,erlang:get_stacktrace()})
   end.
 
+do_safer({first},State)          -> {do_first(State),State};
+do_safer({last},State)           -> {do_last(State),State};
 do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State),State};
 do_safer({lookup,Key},State)     -> {do_lookup(Key,State),State};
 do_safer({bulk,Key,Val},State)   -> do_bulk(insert,Key,Val,State);
@@ -188,6 +194,14 @@ decomp(State,N,Rec,O)  ->
     true -> [{Pos,Rec}|O];
     false-> decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Rec}|O])
   end.
+
+do_first(State) ->
+  #node{type=root,min_key=First} = read_blob_bw(eof,State),
+  First.
+
+do_last(State) ->
+  #node{type=root,max_key=Last} = read_blob_bw(eof,State),
+  Last.
 
 do_insert(Key,Val,State) ->
   {{Key,Val,State}}.
