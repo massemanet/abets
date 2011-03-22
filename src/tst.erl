@@ -438,10 +438,15 @@ mk_header(_State) ->
 do_open(OpenMode,State) ->
   maybe_delete(OpenMode,State),
   {ok,FD} = file:open(filename(State#state.name),[read,append,binary,raw]),
-  Header = mk_header(State),
-  write(FD,[Header]),
+  case eof(FD) of
+    0 ->
+      write(FD,[H = mk_header(State)]),
+      Eof = H#header.size;
+    Eof ->
+      ok
+  end,
   State#state{mode=fill_mode(OpenMode),
-              eof=Header#header.size,
+              eof=Eof,
               fd=FD}.
 
 fill_mode(bulk) -> bulk;
