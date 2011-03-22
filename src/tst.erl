@@ -204,7 +204,10 @@ do_last(State) ->
   Last.
 
 do_insert(Key,Val,State) ->
-  {{Key,Val,State}}.
+  #node{type=root,min_key=Min,max_key=Max} = read_blob_bw(eof,State),
+  K = erlang:max(erlang:min(Key,Max),Min),
+  [Leaf|_] = find_nodes(K,State),
+  {{Key,Val,Leaf,State}}.
 
 do_lookup(Key,State) ->
   try
