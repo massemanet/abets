@@ -209,12 +209,12 @@ do_insert(Key,Val,S) ->
   [Leaf|Ints] = find_nodes(K,R,[],S),
   Blob = (mk_blob(Key,Val))#blob{pos=S#state.eof},
   Nodes = [add_blob_to_leaf(S,Blob,Leaf)|[[I] || I <- Ints]],
-  chk_nods(S#state{cache=[Blob],
+  chk_nods(Leaf,S#state{cache=[Blob],
                    nodes=Nodes,
                    eof=S#state.eof+Blob#blob.size}).
 
 add_blob_to_leaf(#state{len=Len},Blob,#node{type=leaf,recs=Rs}) ->
- case Len < length(Recs = lists:sort([{Blob#blob.key,Blob#blob.pos}|Rs])) of
+ case Len =< length(Recs = lists:sort([{Blob#blob.key,Blob#blob.pos}|Rs])) of
    true ->
      [mk_leaf(Recs)];
    false->
@@ -222,19 +222,8 @@ add_blob_to_leaf(#state{len=Len},Blob,#node{type=leaf,recs=Rs}) ->
      [mk_leaf(R1s),mk_leaf(R2s)]
  end.
 
-mk_leaf(Recs) ->
-  Bin = to_disk_format_leaf(Recs),
-  #node{type=leaf,
-        length=length(Recs),
-        min_key=element(1,hd(Recs)),
-        max_key=element(1,hd(lists:reverse(Recs))),
-        recs=Recs,
-        bin=Bin,
-        size=byte_size(Bin)+pad_size(),
-        zero_pos=leaf}.
-
-chk_nods(S) ->
-  S.
+chk_nods(Leaf,S) ->
+  {Leaf,S}.
 
 do_lookup(Key,State) ->
   try
@@ -252,8 +241,7 @@ read_blob(Key,#node{type=leaf,recs=Recs},State) ->
 find_nodes(Key,State) ->
   find_nodes(Key,read_blob_bw(eof,State),[],State).
 
-find_nodes(Key,N = #node{type=leaf},O,_) ->
-  [exit({no_leaf,Key}) || N#node.min_key =< Key, Key =< N#node.max_key],
+find_nodes(_,N = #node{type=leaf},O,_) ->
   [N|O];
 find_nodes(Key,N = #node{recs=[]},O,State) ->
   find_nodes(Key,read_blob_fw(N#node.zero_pos,State),[N|O],State);
@@ -560,14 +548,22 @@ to_disk_format_blob(Val) ->
   <<?TYPE_TERM:8/integer,Bin/binary>>.
 
 from_disk_format_leaf(Bin,Pos) ->
-  {Len,Recs} = binary_to_term(Bin),
+  Recs = binary_to_term(Bin),
+  (mk_leaf(Recs))#node{pos=Pos}.
+
+mk_leaf(Recs) ->
+  Bin = to_disk_format_leaf(Recs),
   #node{type=leaf,
-        pos=Pos,
-        length=Len,
-        recs=Recs}.
+        length=length(Recs),
+        min_key=element(1,hd(Recs)),
+        max_key=element(1,hd(lists:reverse(Recs))),
+        recs=Recs,
+        bin=Bin,
+        size=byte_size(Bin)+pad_size(),
+        zero_pos=leaf}.
 
 to_disk_format_leaf(Recs) ->
-  to_binary({length(Recs),Recs}).
+  to_binary(Recs).
 
 from_disk_format_int(Bin,Pos) ->
   {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
