@@ -206,24 +206,61 @@ do_last(State) ->
 do_insert(Key,Val,S) ->
   R = #node{type=root} = read_blob_bw(eof,S),
   K = erlang:max(erlang:min(Key,R#node.max_key),R#node.min_key),
-  [Leaf|Ints] = find_nodes(K,R,[],S),
+  Nodes = find_nodes(K,R,[],S),
   Blob = (mk_blob(Key,Val))#blob{pos=S#state.eof},
-  Nodes = [add_blob_to_leaf(S,Blob,Leaf)|[[I] || I <- Ints]],
-  chk_nods(Leaf,S#state{cache=[Blob],
-                   nodes=Nodes,
-                   eof=S#state.eof+Blob#blob.size}).
+  NewLeaves = add_blob_to_leaf(S,Blob,hd(Nodes)),
+  chk_nods(NewLeaves,S#state{cache=[Blob],
+                             nodes=Nodes,
+                             eof=S#state.eof+Blob#blob.size}).
 
-add_blob_to_leaf(#state{len=Len},Blob,#node{type=leaf,recs=Rs}) ->
+add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
  case Len =< length(Recs = lists:sort([{Blob#blob.key,Blob#blob.pos}|Rs])) of
    true ->
-     [mk_leaf(Recs)];
+     [mk_leaf(Recs,Eof+Blob#blob.size)];
    false->
      {R1s,R2s} = lists:split(Len div 2,Recs),
-     [mk_leaf(R1s),mk_leaf(R2s)]
+     L1=mk_leaf(R1s,Eof+Blob#blob.size),
+     L2=mk_leaf(R2s,Eof+Blob#blob.size+L1#node.size),
+     [L1,L2]
  end.
 
-chk_nods(Leaf,S) ->
-  {Leaf,S}.
+chk_nods([Root],S = #state{nodes=[_],eof=Eof,cache=Cache}) ->
+  S#state{cache=Cache++[Root#node{pos=Eof}],
+          nodes=[],
+          eof=Eof+Root#node.size};
+chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands],eof=Eof}) ->
+  Dads = replace_node(Kid,Kids,Dad,S),
+  chk_nods(Dads,S#state{cache=Cache++adjust_pos(Kids,S),
+                        nodes=[Dad|Grands],
+                        eof=Eof+lists:sum([K#node.size || K <- Kids])}).
+
+replace_node(Kid,[NewKid],Dad,_) ->
+  case is_smallest(Kid,Dad) of
+    true -> [Dad#node{zero_pos=NewKid#node.pos,min_key=min_key(NewKid,Dad)}];
+    false-> [replace_rec(Kid,NewKid,Dad)]
+  end;
+replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
+  Dad = replace_node(Kid,[Kid1],OldDad,S),
+  case Len =< OldDad#node.length of
+    true -> exit({node_split,OldDad});
+    false->
+      Recs = [{Kid2#node.min_key,Kid2#node.pos}|Dad#node.recs],
+      Dad#node{recs=lists:sort(Recs),length=length(Recs)}
+  end.
+
+is_smallest(#node{min_key=Min0},#node{min_key=Min1}) ->
+  Min0 =:= Min1.
+
+replace_rec(#node{min_key=K0},#node{min_key=K1,pos=Pos},N) ->
+  N#node{recs=[maybe_replace_rec(K0,{K1,Pos},{K,P})||{K,P}<-N#node.recs]}.
+
+maybe_replace_rec(K,NewRec,{K,_}) -> NewRec;
+maybe_replace_rec(_,_,OldRec) -> OldRec.
+
+min_key(#node{min_key=K1},#node{min_key=K2}) -> erlang:min(K1,K2).
+
+adjust_pos(Nodes,#state{eof=Eof}) ->
+  Nodes.
 
 do_lookup(Key,State) ->
   try
@@ -263,7 +300,7 @@ find(_,[{_,P0}]) ->
 finalize(S0 = #state{cache=[],blobs=Blobs}) ->
   case length(Blobs) =< S0#state.len of
     true ->
-      Leaf = mk_leaf(Blobs,S0#state.eof),
+      Leaf = mk_leaf_bulk(Blobs,S0#state.eof),
       S2 =
         check_nodes(S0#state{nodes=add_leaf(Leaf,S0),
                              cache=Blobs++[Leaf],
@@ -271,13 +308,13 @@ finalize(S0 = #state{cache=[],blobs=Blobs}) ->
                              blobs=[]});
     false->
       {Blobs1,Blobs2} = lists:split(length(Blobs) div 2,Blobs),
-      Leaf1 = mk_leaf(Blobs1,S0#state.eof),
+      Leaf1 = mk_leaf_bulk(Blobs1,S0#state.eof),
       S1 =
         check_nodes(S0#state{nodes=add_leaf(Leaf1,S0),
                              cache=Blobs1++[Leaf1],
                              eof=Leaf1#node.pos+Leaf1#node.size,
                              blobs=Blobs2}),
-      Leaf2 = mk_leaf(Blobs2,S1#state.eof),
+      Leaf2 = mk_leaf_bulk(Blobs2,S1#state.eof),
       S2 =
         check_nodes(S1#state{nodes=add_leaf(Leaf2,S1),
                              cache=S1#state.cache++Blobs2++[Leaf2],
@@ -330,7 +367,7 @@ add_blob(Key,Val,S = #state{blobs=Blobs}) ->
   case S#state.len2 =< length(Blobs) of
     true ->
       {BlobsH,BlobsT} = lists:split(S#state.len,Blobs),
-      NewLeaf = mk_leaf(BlobsH,S#state.eof),
+      NewLeaf = mk_leaf_bulk(BlobsH,S#state.eof),
       flush_cache(
         check_nodes(
           S#state{nodes=add_leaf(NewLeaf,S),
@@ -383,36 +420,18 @@ mk_root(Nodes,Eof) ->
         recs=T#tmp.recs,
         bin=Bin}.
 
-mk_node(Nodes,Eof) ->
+mk_node(Nodes,Pos) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  Bin = to_disk_format_int(T),
-  #node{type=internal,
-        length=T#tmp.len,
-        size=byte_size(Bin)+pad_size(),
-        min_key=T#tmp.min,
-        max_key=T#tmp.max,
-        pos=Eof,
-        zero_pos=T#tmp.zp,
-        recs=T#tmp.recs,
-        bin=Bin}.
+  mk_internal(T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs,Pos).
 
 noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
   T#tmp{zp=Pos,len=1,min=Min,max=Max,recs=[]};
 noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
   T#tmp{len=Len+1,max=Max,recs=Recs++[{Min,Pos}]}.
 
-mk_leaf(Blobs,Eof) ->
+mk_leaf_bulk(Blobs,Eof) ->
   T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
-  Bin = to_disk_format_leaf(T#tmp.recs),
-  #node{type=leaf,
-        length=T#tmp.len,
-        size=byte_size(Bin)+pad_size(),
-        min_key=T#tmp.min,
-        max_key=T#tmp.max,
-        pos=T#tmp.eof,
-        zero_pos=leaf,
-        recs=T#tmp.recs,
-        bin=Bin}.
+  mk_leaf(T#tmp.recs,T#tmp.eof).
 
 boff_f(#blob{key=Key,size=Size},T = #tmp{len=0,eof=Eof}) ->
   T#tmp{eof=Eof+Size,recs=[{Key,Eof}],len=1,min=Key,max=Key};
@@ -549,11 +568,12 @@ to_disk_format_blob(Val) ->
 
 from_disk_format_leaf(Bin,Pos) ->
   Recs = binary_to_term(Bin),
-  (mk_leaf(Recs))#node{pos=Pos}.
+  mk_leaf(Recs,Pos).
 
-mk_leaf(Recs) ->
+mk_leaf(Recs,Pos) ->
   Bin = to_disk_format_leaf(Recs),
   #node{type=leaf,
+        pos=Pos,
         length=length(Recs),
         min_key=element(1,hd(Recs)),
         max_key=element(1,hd(lists:reverse(Recs))),
@@ -566,17 +586,23 @@ to_disk_format_leaf(Recs) ->
   to_binary(Recs).
 
 from_disk_format_int(Bin,Pos) ->
-  {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
+  {Zp,Min,Max,Recs} = binary_to_term(Bin),
+  mk_internal(Zp,Min,Max,Recs,Pos).
+
+mk_internal(Zp,Min,Max,Recs,Pos) ->
+  Bin = to_disk_format_int(Zp,Min,Max,Recs),
   #node{type=internal,
         pos=Pos,
-        length=Len,
+        length=length(Recs)+1,
         min_key=Min,
         max_key=Max,
+        size=byte_size(Bin)+pad_size(),
+        bin=Bin,
         zero_pos=Zp,
         recs=Recs}.
 
-to_disk_format_int(T) ->
-  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+to_disk_format_int(Zp,Min,Max,Recs) ->
+  to_binary({Zp,Min,Max,Recs}).
 
 from_disk_format_root(Bin,Pos) ->
   {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
