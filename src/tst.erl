@@ -409,20 +409,11 @@ add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
 
 mk_root(Nodes,Eof) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  Bin = to_disk_format_root(T),
-  #node{type=root,
-        length=T#tmp.len,
-        size=byte_size(Bin)+pad_size(),
-        min_key=T#tmp.min,
-        max_key=T#tmp.max,
-        pos=Eof,
-        zero_pos=T#tmp.zp,
-        recs=T#tmp.recs,
-        bin=Bin}.
+  mk_root(T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs,Eof).
 
 mk_node(Nodes,Pos) ->
   T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  mk_internal(T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs,Pos).
+  mk_internal(T#tmp.zp,T#tmp.min,T#tmp.recs,Pos).
 
 noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
   T#tmp{zp=Pos,len=1,min=Min,max=Max,recs=[]};
@@ -549,12 +540,13 @@ wrap(Rec) ->
 unwrap(Type,B,Pos) ->
   case Type of
     ?TYPE_LEAF_NODE -> from_disk_format_leaf(B,Pos);
-    ?TYPE_INT_NODE  -> from_disk_format_int(B,Pos);
+    ?TYPE_INT_NODE  -> from_disk_format_internal(B,Pos);
     ?TYPE_ROOT_NODE -> from_disk_format_root(B,Pos);
     ?TYPE_BLOB      -> from_disk_format_blob(B,Pos);
     ?TYPE_HEADER    -> from_disk_format_header(B,Pos)
   end.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 from_disk_format_blob(<<?TYPE_BIN:8/integer,Bin/binary>>,Pos) ->
   #blob{data=Bin,pos=Pos};
 from_disk_format_blob(<<?TYPE_TERM:8/integer,Bin/binary>>,Pos) ->
@@ -566,6 +558,7 @@ to_disk_format_blob(Val) ->
   Bin=to_binary(Val),
   <<?TYPE_TERM:8/integer,Bin/binary>>.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 from_disk_format_leaf(Bin,Pos) ->
   Recs = binary_to_term(Bin),
   mk_leaf(Recs,Pos).
@@ -585,45 +578,55 @@ mk_leaf(Recs,Pos) ->
 to_disk_format_leaf(Recs) ->
   to_binary(Recs).
 
-from_disk_format_int(Bin,Pos) ->
-  {Zp,Min,Max,Recs} = binary_to_term(Bin),
-  mk_internal(Zp,Min,Max,Recs,Pos).
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+from_disk_format_internal(Bin,Pos) ->
+  {Zp,Min,Recs} = binary_to_term(Bin),
+  mk_internal(Zp,Min,Recs,Pos).
 
-mk_internal(Zp,Min,Max,Recs,Pos) ->
-  Bin = to_disk_format_int(Zp,Min,Max,Recs),
+mk_internal(Zp,Min,Recs,Pos) ->
+  Bin = to_disk_format_internal(Zp,Min,Recs),
   #node{type=internal,
         pos=Pos,
         length=length(Recs)+1,
         min_key=Min,
-        max_key=Max,
         size=byte_size(Bin)+pad_size(),
         bin=Bin,
         zero_pos=Zp,
         recs=Recs}.
 
-to_disk_format_int(Zp,Min,Max,Recs) ->
-  to_binary({Zp,Min,Max,Recs}).
+to_disk_format_internal(Zp,Min,Recs) ->
+  to_binary({Zp,Min,Recs}).
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 from_disk_format_root(Bin,Pos) ->
-  {Len,Zp,Min,Max,Recs} = binary_to_term(Bin),
+  {Zp,Min,Max,Recs} = binary_to_term(Bin),
+  mk_root(Zp,Min,Max,Recs,Pos).
+
+mk_root(Zp,Min,Max,Recs,Pos) ->
+  Bin = to_disk_format_root(Zp,Min,Max,Recs),
   #node{type=root,
         pos=Pos,
-        length=Len,
+        length=length(Recs)+1,
         min_key=Min,
         max_key=Max,
         zero_pos=Zp,
+        size=byte_size(Bin)+pad_size(),
+        bin=Bin,
         recs=Recs}.
 
-to_disk_format_root(T) ->
-  to_binary({T#tmp.len,T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs}).
+to_disk_format_root(Zp,Min,Max,Recs) ->
+  to_binary({Zp,Min,Max,Recs}).
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 from_disk_format_header(Bin,Pos) ->
   #header{pos=Pos,
           data=binary_to_term(Bin)}.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 to_disk_format_header(Data) ->
   term_to_binary(Data).
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 to_binary(Term) ->
   term_to_binary(Term,[{compressed,3},{minor_version,1}]).
 
