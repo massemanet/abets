@@ -228,11 +228,12 @@ chk_nods([Root],S = #state{nodes=[_],eof=Eof,cache=Cache}) ->
   S#state{cache=Cache++[Root#node{pos=Eof}],
           nodes=[],
           eof=Eof+Root#node.size};
-chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands],eof=Eof}) ->
+chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
   Dads = replace_node(Kid,Kids,Dad,S),
-  chk_nods(Dads,S#state{cache=Cache++adjust_pos(Kids,S),
+  {NewEof,NewKids} = move_pointers(Kids,S),
+  chk_nods(Dads,S#state{cache=Cache++NewKids,
                         nodes=[Dad|Grands],
-                        eof=Eof+lists:sum([K#node.size || K <- Kids])}).
+                        eof=NewEof}).
 
 replace_node(Kid,[NewKid],Dad,_) ->
   case is_smallest(Kid,Dad) of
@@ -241,11 +242,15 @@ replace_node(Kid,[NewKid],Dad,_) ->
   end;
 replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
   Dad = replace_node(Kid,[Kid1],OldDad,S),
-  case Len =< OldDad#node.length of
-    true -> exit({node_split,OldDad});
+  Recs = [{Kid2#node.min_key,Kid2#node.pos}|Dad#node.recs],
+  case Len =< Dad#node.length of
+    true -> 
+      Rs = lists:sort([{Dad#node.min_key,Dad#node.zero_pos}|Recs]),
+      {[{M1,Z1}|Rs1],[{M2,Z2}|Rs2]} = lists:split(length(Rs)+1 div 2,Rs),
+      [mk_internal(Z1,M1,Rs1,0),
+       mk_internal(Z2,M2,Rs2,0)];
     false->
-      Recs = [{Kid2#node.min_key,Kid2#node.pos}|Dad#node.recs],
-      Dad#node{recs=lists:sort(Recs),length=length(Recs)}
+      [Dad#node{recs=Recs,length=length(Recs)}]
   end.
 
 is_smallest(#node{min_key=Min0},#node{min_key=Min1}) ->
@@ -259,8 +264,11 @@ maybe_replace_rec(_,_,OldRec) -> OldRec.
 
 min_key(#node{min_key=K1},#node{min_key=K2}) -> erlang:min(K1,K2).
 
-adjust_pos(Nodes,#state{eof=Eof}) ->
-  Nodes.
+move_pointers(Nodes,#state{eof=Eof}) ->
+  lists:foldl(fun mp_fun/2,{Eof,[]},Nodes).
+
+mp_fun(N = #node{size=Size},{Eof,Nodes}) ->
+  {Eof+Size,Nodes++[N#node{pos=Eof}]}.
 
 do_lookup(Key,State) ->
   try
