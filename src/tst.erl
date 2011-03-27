@@ -7,8 +7,7 @@
 -module('tst').
 -author('mats cronqvist').
 
--export([tree/1,
-         unit/0, unit/1
+-export([unit/0, unit/1
          , wunit/0, wunit/1
          , unit_bulk_small/0
          , unit_bulk/0]).
@@ -40,6 +39,7 @@
          name,
          fd,
          mode,
+         max_key,
          cache=[],
          blobs=[],
          nodes=[[]]}).
@@ -67,12 +67,6 @@
          zero_pos=0,
          recs=[],
          bin}).
-
-tree(L) ->
-  finalize(lists:foldl(fun add_blob_f/2,#state{},lists:seq(1,L))).
-
-add_blob_f(N,S)->
-  add_blob({k,N},{v,N},S).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% the api
@@ -336,7 +330,7 @@ finalize(S0 = #state{mode=bulk,cache=[],blobs=Blobs}) ->
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
   case length(Ns) =< S#state.len of
     true ->
-      Root = mk_root(Ns,Eof),
+      Root = mk_root(Ns,S#state.max_key,Eof),
       NewEof = Root#node.pos+Root#node.size,
       S#state{eof=NewEof,cache=Cache++[Root],nodes=[]};
     false->
@@ -417,18 +411,13 @@ add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
 
 -record(tmp,{eof,recs,len=0,min,max,zp}).
 
-mk_root(Nodes,Eof) ->
-  T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  mk_root(T#tmp.zp,T#tmp.min,T#tmp.max,T#tmp.recs,Eof).
+mk_root(Nodes,Max,Pos) ->
+  [{Min,Zp}|Recs] = [{Min,Ps} || #node{pos=Ps,min_key=Min} <- Nodes],
+  mk_root(Zp,Min,Max,Recs,Pos).
 
 mk_node(Nodes,Pos) ->
-  T = lists:foldl(fun noff_f/2,#tmp{},Nodes),
-  mk_internal(T#tmp.zp,T#tmp.min,T#tmp.recs,Pos).
-
-noff_f(#node{pos=Pos,min_key=Min,max_key=Max},T = #tmp{len=0})->
-  T#tmp{zp=Pos,len=1,min=Min,max=Max,recs=[]};
-noff_f(#node{pos=Pos,max_key=Max,min_key=Min},T = #tmp{len=Len,recs=Recs})->
-  T#tmp{len=Len+1,max=Max,recs=Recs++[{Min,Pos}]}.
+  [{Min,Zp}|Recs] = [{Min,Ps} || #node{pos=Ps,min_key=Min} <- Nodes],
+  mk_internal(Zp,Min,Recs,Pos).
 
 mk_leaf_bulk(Blobs,Eof) ->
   T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
