@@ -305,7 +305,7 @@ find(_,[{_,P0}]) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
-finalize(S0 = #state{cache=[],blobs=Blobs}) ->
+finalize(S0 = #state{mode=bulk,cache=[],blobs=Blobs}) ->
   case length(Blobs) =< S0#state.len of
     true ->
       Leaf = mk_leaf_bulk(Blobs,S0#state.eof),
@@ -313,6 +313,7 @@ finalize(S0 = #state{cache=[],blobs=Blobs}) ->
         check_nodes(S0#state{nodes=add_leaf(Leaf,S0),
                              cache=Blobs++[Leaf],
                              eof=Leaf#node.pos+Leaf#node.size,
+                             mode=normal,
                              blobs=[]});
     false->
       {Blobs1,Blobs2} = lists:split(length(Blobs) div 2,Blobs),
@@ -327,6 +328,7 @@ finalize(S0 = #state{cache=[],blobs=Blobs}) ->
         check_nodes(S1#state{nodes=add_leaf(Leaf2,S1),
                              cache=S1#state.cache++Blobs2++[Leaf2],
                              eof=Leaf2#node.pos+Leaf2#node.size,
+                             mode=normal,
                              blobs=[]})
   end,
   flush_cache(finalize_nodes(S2)).
