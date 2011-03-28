@@ -412,7 +412,7 @@ finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[NHs|NTs]}) ->
       Node2 = mk_node_bulk(NH2s,NewEof1),
       NewEof2 = Node2#node.pos+Node2#node.size,
       finalize_nodes(S#state{cache=Cache++[Node1,Node2],
-                             nodes=add_node(Node1,add_node(Node1,NTs)),
+                             nodes=add_node(Node2,add_node(Node1,NTs)),
                              eof=NewEof2})
   end.
 
