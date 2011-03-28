@@ -29,6 +29,8 @@
          , last/1
          , next/2]).
 
+-import(erlang,[min/2,max/2]).
+
 -define(SIZE,4).
 
 -record(state,
@@ -48,7 +50,7 @@
         {bin,
          pos,
          size,
-         data}).
+         preamble}).
 
 -record(blob,
         {key,
@@ -61,7 +63,6 @@
         {type,
          pos,
          size=0,
-         length=0,
          min_key,
          max_key,
          zero_pos=0,
@@ -178,7 +179,7 @@ do_new(Tab,How) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% B+tree logic
 
-%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_decompose(N,State) ->
   decomp(State,N,read_blob_bw(eof,State),[]).
 
@@ -189,22 +190,26 @@ decomp(State,N,Rec,O)  ->
     false-> decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Rec}|O])
   end.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_first(State) ->
   #node{type=root,min_key=First} = read_blob_bw(eof,State),
   First.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_last(State) ->
   #node{type=root,max_key=Last} = read_blob_bw(eof,State),
   Last.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_insert(Key,Val,S) ->
   R = #node{type=root} = read_blob_bw(eof,S),
-  K = erlang:max(erlang:min(Key,R#node.max_key),R#node.min_key),
+  K = max(min(Key,R#node.max_key),R#node.min_key),
   Nodes = find_nodes(K,R,[],S),
-  Blob = (mk_blob(Key,Val))#blob{pos=S#state.eof},
+  Blob = mk_blob(Key,Val,S#state.eof),
   NewLeaves = add_blob_to_leaf(S,Blob,hd(Nodes)),
   chk_nods(NewLeaves,S#state{cache=[Blob],
                              nodes=Nodes,
+                             max_key=max(R#node.max_key,Key),
                              eof=S#state.eof+Blob#blob.size}).
 
 add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
@@ -219,7 +224,7 @@ add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
  end.
 
 chk_nods([Root],S = #state{nodes=[_],eof=Eof,cache=Cache}) ->
-  S#state{cache=Cache++[Root#node{pos=Eof}],
+  S#state{cache=Cache++[Root#node{pos=Eof,max_key=S#state.max_key}],
           nodes=[],
           eof=Eof+Root#node.size};
 chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
@@ -237,14 +242,14 @@ replace_node(Kid,[NewKid],Dad,_) ->
 replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
   Dad = replace_node(Kid,[Kid1],OldDad,S),
   Recs = [{Kid2#node.min_key,Kid2#node.pos}|Dad#node.recs],
-  case Len =< Dad#node.length of
-    true -> 
+  case Len =< get_length(Dad) of
+    true ->
       Rs = lists:sort([{Dad#node.min_key,Dad#node.zero_pos}|Recs]),
-      {[{M1,Z1}|Rs1],[{M2,Z2}|Rs2]} = lists:split(length(Rs)+1 div 2,Rs),
+      {[{M1,Z1}|Rs1],[{M2,Z2}|Rs2]} = lists:split(length(Rs) div 2,Rs),
       [mk_internal(Z1,M1,Rs1,0),
        mk_internal(Z2,M2,Rs2,0)];
     false->
-      [Dad#node{recs=Recs,length=length(Recs)}]
+      [Dad#node{recs=Recs}]
   end.
 
 is_smallest(#node{min_key=Min0},#node{min_key=Min1}) ->
@@ -264,6 +269,7 @@ move_pointers(Nodes,#state{eof=Eof}) ->
 mp_fun(N = #node{size=Size},{Eof,Nodes}) ->
   {Eof+Size,Nodes++[N#node{pos=Eof}]}.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_lookup(Key,State) ->
   try
     [Leaf|_] = find_nodes(Key,State),
@@ -296,8 +302,56 @@ find(Key,[{K0,P0},{K1,P1}|Recs]) ->
   end;
 find(_,[{_,P0}]) ->
   P0.
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_bulk(commit,_,_,State)->
+  {ok,finalize(State)};
+do_bulk(insert,Key,Val,State)->
+  {ok,add_blob(Key,Val,State)}.
+
+add_blob(Key,Val,S = #state{blobs=Blobs}) ->
+  case S#state.len2 =< length(Blobs) of
+    true ->
+      {BlobsH,BlobsT} = lists:split(S#state.len,Blobs),
+      NewLeaf = mk_leaf_bulk(BlobsH,S#state.eof),
+      flush_cache(
+        check_nodes(
+          S#state{nodes=add_leaf(NewLeaf,S),
+                  cache=BlobsH++[NewLeaf],
+                  max_key=max(S#state.max_key,Key),
+                  eof=NewLeaf#node.pos+NewLeaf#node.size,
+                  blobs=BlobsT++[mk_blob(Key,Val,0)]}));
+    false->
+      S#state{blobs=Blobs++[mk_blob(Key,Val,0)],
+              max_key=max(S#state.max_key,Key)}
+  end.
+
+add_leaf(Leaf,#state{nodes=[Leaves|Ints]}) ->
+  [Leaves++[Leaf]|Ints].
+
+check_nodes(S = #state{nodes=Nodes}) ->
+  {NewNodes,NewCache,NewEof} = chk_nodes(Nodes,S),
+  S#state{nodes=NewNodes,
+          cache=S#state.cache++NewCache,
+          eof=NewEof}.
+
+chk_nodes(Nodes,#state{len=S,len2=S2,eof=Eof}) ->
+  chk_nodes(Nodes,{[],[],Eof},{S,S2}).
+
+chk_nodes([],O,_)         -> O;
+chk_nodes([N0s|Nss],{Ns,Cache,Eof},C={S,S2}) ->
+  case S2 < length(N0s) of
+    true ->
+      {NodesH,NodesT} = lists:split(S,N0s),
+      Node = mk_node_bulk(NodesH,Eof),
+      NewEof = Node#node.pos+Node#node.size,
+      chk_nodes(add_node(Node,Nss),{Ns++[NodesT],Cache++[Node],NewEof},C);
+    false->
+      {Ns++[N0s|Nss],Cache,Eof}
+  end.
+
+add_node(N,[]) -> [[N]];
+add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
 
 finalize(S0 = #state{mode=bulk,cache=[],blobs=Blobs}) ->
   case length(Blobs) =< S0#state.len of
@@ -330,14 +384,14 @@ finalize(S0 = #state{mode=bulk,cache=[],blobs=Blobs}) ->
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
   case length(Ns) =< S#state.len of
     true ->
-      Root = mk_root(Ns,S#state.max_key,Eof),
+      Root = mk_root_bulk(Ns,S#state.max_key,Eof),
       NewEof = Root#node.pos+Root#node.size,
       S#state{eof=NewEof,cache=Cache++[Root],nodes=[]};
     false->
       {N1s,N2s} = lists:split(length(Ns) div 2,Ns),
-      Node1 = mk_node(N1s,Eof),
+      Node1 = mk_node_bulk(N1s,Eof),
       NewEof1 = Node1#node.pos+Node1#node.size,
-      Node2 = mk_node(N2s,NewEof1),
+      Node2 = mk_node_bulk(N2s,NewEof1),
       NewEof2 = Node2#node.pos+Node2#node.size,
       finalize_nodes(S#state{cache=Cache++[Node1,Node2],
                              nodes=[[Node1,Node2]],
@@ -346,102 +400,38 @@ finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
 finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[NHs|NTs]}) ->
   case length(NHs) =< S#state.len of
     true ->
-      Node = mk_node(NHs,Eof),
+      Node = mk_node_bulk(NHs,Eof),
       NewEof = Node#node.pos+Node#node.size,
       finalize_nodes(S#state{cache=Cache++[Node],
                              nodes=add_node(Node,NTs),
                              eof=NewEof});
     false->
       {NH1s,NH2s} = lists:split(length(NHs) div 2,NHs),
-      Node1 = mk_node(NH1s,Eof),
+      Node1 = mk_node_bulk(NH1s,Eof),
       NewEof1 = Node1#node.pos+Node1#node.size,
-      Node2 = mk_node(NH2s,NewEof1),
+      Node2 = mk_node_bulk(NH2s,NewEof1),
       NewEof2 = Node2#node.pos+Node2#node.size,
       finalize_nodes(S#state{cache=Cache++[Node1,Node2],
                              nodes=add_node(Node1,add_node(Node1,NTs)),
                              eof=NewEof2})
   end.
 
-do_bulk(commit,_,_,State)->
-  {ok,finalize(State)};
-do_bulk(insert,Key,Val,State)->
-  {ok,add_blob(Key,Val,State)}.
-
-add_blob(Key,Val,S = #state{blobs=Blobs}) ->
-  case S#state.len2 =< length(Blobs) of
-    true ->
-      {BlobsH,BlobsT} = lists:split(S#state.len,Blobs),
-      NewLeaf = mk_leaf_bulk(BlobsH,S#state.eof),
-      flush_cache(
-        check_nodes(
-          S#state{nodes=add_leaf(NewLeaf,S),
-                  cache=BlobsH++[NewLeaf],
-                  eof=NewLeaf#node.pos+NewLeaf#node.size,
-                  blobs=BlobsT++[mk_blob(Key,Val)]}));
-    false->
-      S#state{blobs=Blobs++[mk_blob(Key,Val)]}
-  end.
-
-add_leaf(Leaf,#state{nodes=[Leaves|Ints]}) ->
-  [Leaves++[Leaf]|Ints].
-
-check_nodes(S = #state{nodes=Nodes}) ->
-  {NewNodes,NewCache,NewEof} = chk_nodes(Nodes,S),
-  S#state{nodes=NewNodes,
-          cache=S#state.cache++NewCache,
-          eof=NewEof}.
-
-chk_nodes(Nodes,#state{len=S,len2=S2,eof=Eof}) ->
-  chk_nodes(Nodes,{[],[],Eof},{S,S2}).
-
-chk_nodes([],O,_)         -> O;
-chk_nodes([N0s|Nss],{Ns,Cache,Eof},C={S,S2}) ->
-  case S2 < length(N0s) of
-    true ->
-      {NodesH,NodesT} = lists:split(S,N0s),
-      Node = mk_node(NodesH,Eof),
-      NewEof = Node#node.pos+Node#node.size,
-      chk_nodes(add_node(Node,Nss),{Ns++[NodesT],Cache++[Node],NewEof},C);
-    false->
-      {Ns++[N0s|Nss],Cache,Eof}
-  end.
-
-add_node(N,[]) -> [[N]];
-add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
-
--record(tmp,{eof,recs,len=0,min,max,zp}).
-
-mk_root(Nodes,Max,Pos) ->
+mk_root_bulk(Nodes,Max,Pos) ->
   [{Min,Zp}|Recs] = [{Min,Ps} || #node{pos=Ps,min_key=Min} <- Nodes],
   mk_root(Zp,Min,Max,Recs,Pos).
 
-mk_node(Nodes,Pos) ->
+mk_node_bulk(Nodes,Pos) ->
   [{Min,Zp}|Recs] = [{Min,Ps} || #node{pos=Ps,min_key=Min} <- Nodes],
   mk_internal(Zp,Min,Recs,Pos).
 
 mk_leaf_bulk(Blobs,Eof) ->
-  T = lists:foldl(fun boff_f/2,#tmp{eof=Eof},Blobs),
-  mk_leaf(T#tmp.recs,T#tmp.eof).
+  {EOF,Recs} = lists:foldl(fun boff_f/2,{Eof,[]},Blobs),
+  mk_leaf(Recs,EOF).
 
-boff_f(#blob{key=Key,size=Size},T = #tmp{len=0,eof=Eof}) ->
-  T#tmp{eof=Eof+Size,recs=[{Key,Eof}],len=1,min=Key,max=Key};
-boff_f(#blob{key=Key,size=Size},T = #tmp{eof=Eof,len=Len,recs=Recs})->
-  T#tmp{eof=Eof+Size,recs=Recs++[{Key,Eof}],len=Len+1,max=Key}.
+boff_f(#blob{key=Key,size=Size},{Eof,Recs})->
+  {Eof+Size,Recs++[{Key,Eof}]}.
 
-mk_blob(Key,Val) ->
-  Bin = to_disk_format_blob(Val),
-  #blob{key=Key,
-        data=Val,
-        bin=Bin,
-        size=byte_size(Bin)+pad_size()}.
-
-mk_header(_State) ->
-  Data = "ABETS v1",
-  Bin = to_disk_format_header(Data),
-  #header{bin = Bin,
-          data = Data,
-          size=byte_size(Bin)+pad_size()}.
-
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% file ops
@@ -551,6 +541,14 @@ from_disk_format_blob(<<?TYPE_BIN:8/integer,Bin/binary>>,Pos) ->
 from_disk_format_blob(<<?TYPE_TERM:8/integer,Bin/binary>>,Pos) ->
   #blob{data=binary_to_term(Bin),pos=Pos}.
 
+mk_blob(Key,Val,Pos) ->
+  Bin = to_disk_format_blob(Val),
+  #blob{key=Key,
+        data=Val,
+        pos=Pos,
+        bin=Bin,
+        size=byte_size(Bin)+pad_size()}.
+
 to_disk_format_blob(Bin) when is_binary(Bin) ->
   <<?TYPE_BIN:8/integer,Bin/binary>>;
 to_disk_format_blob(Val) ->
@@ -566,7 +564,6 @@ mk_leaf(Recs,Pos) ->
   Bin = to_disk_format_leaf(Recs),
   #node{type=leaf,
         pos=Pos,
-        length=length(Recs),
         min_key=element(1,hd(Recs)),
         max_key=element(1,hd(lists:reverse(Recs))),
         recs=Recs,
@@ -586,7 +583,6 @@ mk_internal(Zp,Min,Recs,Pos) ->
   Bin = to_disk_format_internal(Zp,Min,Recs),
   #node{type=internal,
         pos=Pos,
-        length=length(Recs)+1,
         min_key=Min,
         size=byte_size(Bin)+pad_size(),
         bin=Bin,
@@ -605,7 +601,6 @@ mk_root(Zp,Min,Max,Recs,Pos) ->
   Bin = to_disk_format_root(Zp,Min,Max,Recs),
   #node{type=root,
         pos=Pos,
-        length=length(Recs)+1,
         min_key=Min,
         max_key=Max,
         zero_pos=Zp,
@@ -618,12 +613,21 @@ to_disk_format_root(Zp,Min,Max,Recs) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 from_disk_format_header(Bin,Pos) ->
-  #header{pos=Pos,
-          data=binary_to_term(Bin)}.
+  Preamble = binary_to_term(Bin),
+  mk_header(Preamble,Pos).
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-to_disk_format_header(Data) ->
-  term_to_binary(Data).
+mk_header(#state{}) ->
+  mk_header("ABETS v1",0).
+
+mk_header(Preamble,Pos) ->
+  Bin = to_disk_format_header(Preamble),
+  #header{preamble=Preamble,
+          pos=Pos,
+          bin=Bin,
+          size=byte_size(Bin)+pad_size()}.
+
+to_disk_format_header(Preamble) ->
+  term_to_binary(Preamble).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 to_binary(Term) ->
@@ -632,6 +636,10 @@ to_binary(Term) ->
 eof(FD) ->
   {ok,Pos} = file:position(FD,eof),
   Pos.
+
+get_length(#node{type=leaf,recs=Recs})     -> length(Recs);
+get_length(#node{type=internal,recs=Recs}) -> length(Recs)+1;
+get_length(#node{type=root,recs=Recs})     -> length(Recs)+1.
 
 get_bin(#header{bin=Bin}) -> Bin;
 get_bin(#node{bin=Bin})   -> Bin;
