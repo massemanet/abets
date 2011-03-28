@@ -10,7 +10,7 @@
 -export([unit/0, unit/1
          , wunit/0, wunit/1
          , unit_bulk_small/0
-         , unit_bulk/0]).
+         , unit_bulk/0, unit_bulk/1]).
 
 -export([handle_call/3
          , init/1
@@ -470,7 +470,6 @@ maybe_delete(normal,_) -> ok;
 maybe_delete(_,#state{name=Name}) -> file:delete(filename(Name)).
 
 flush_cache(S = #state{fd=FD,cache=Cache}) ->
-  io:fwrite("FLUSHING:~n~p~n",[S#state.cache]),
   write(FD,Cache),
   S#state{cache=[]}.
 
@@ -663,6 +662,20 @@ unit_bulk() ->
   new(foo,[bulk]),
   [bulk(foo,N,{mange,N})||N<-[10,11,12,13,14,15,16,17,18,19,20,21,22]],
   bulk(foo,commit).
+
+unit_bulk(M) ->
+  [(fun ubf/1)(N) || N <- lists:seq(1,M)],
+  ok.
+
+ubf(M)->
+  Seq=lists:seq(1,M),
+  catch tst:destroy(foo),
+  tst:new(foo,[bulk]),
+  [tst:bulk(foo,{k,N},{v,N})||N<-Seq],
+  tst:bulk(foo,commit),
+  [try {v,N}=tst:lookup(foo,{k,N})
+   catch _:R->exit({R,N,lists:last(Seq)})
+   end || N <- Seq].
 
 unit_bulk_small() ->
   catch destroy(foo),
