@@ -207,26 +207,28 @@ do_insert(Key,Val,S) ->
   Nodes = find_nodes(K,R,[],S),
   Blob = mk_blob(Key,Val,S#state.eof),
   NewLeaves = add_blob_to_leaf(S,Blob,hd(Nodes)),
-  chk_nods(NewLeaves,S#state{cache=[Blob],
-                             nodes=Nodes,
-                             max_key=max(R#node.max_key,Key),
-                             eof=S#state.eof+Blob#blob.size}).
+  flush_cache(
+    chk_nods(NewLeaves,S#state{cache=[Blob],
+                               nodes=Nodes,
+                               max_key=max(R#node.max_key,Key),
+                               eof=S#state.eof+Blob#blob.size})).
 
 add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
- case Len =< length(Recs = lists:sort([{Blob#blob.key,Blob#blob.pos}|Rs])) of
+ case Len < length(Recs = lists:sort([{Blob#blob.key,Blob#blob.pos}|Rs])) of
    true ->
-     [mk_leaf(Recs,Eof+Blob#blob.size)];
-   false->
      {R1s,R2s} = lists:split(Len div 2,Recs),
      L1=mk_leaf(R1s,Eof+Blob#blob.size),
      L2=mk_leaf(R2s,Eof+Blob#blob.size+L1#node.size),
-     [L1,L2]
+     [L1,L2];
+   false->
+     [mk_leaf(Recs,Eof+Blob#blob.size)]
  end.
 
-chk_nods([Root],S = #state{nodes=[_],eof=Eof,cache=Cache}) ->
-  S#state{cache=Cache++[Root#node{pos=Eof,max_key=S#state.max_key}],
+chk_nods([Root],S = #state{nodes=[_],cache=Cache}) ->
+  {NewEof,[NewRoot]} = move_pointers([Root],S),
+  S#state{cache=Cache++[NewRoot],
           nodes=[],
-          eof=Eof+Root#node.size};
+          eof=NewEof};
 chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
   Dads = replace_node(Kid,Kids,Dad,S),
   {NewEof,NewKids} = move_pointers(Kids,S),
@@ -353,7 +355,7 @@ chk_nodes([N0s|Nss],{Ns,Cache,Eof},C={S,S2}) ->
 add_node(N,[]) -> [[N]];
 add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
 
-finalize(S0 = #state{mode=bulk,cache=[],blobs=Blobs}) ->
+finalize(S0 = #state{cache=[],blobs=Blobs}) ->
   case length(Blobs) =< S0#state.len of
     true ->
       Leaf = mk_leaf_bulk(Blobs,S0#state.eof),
@@ -455,13 +457,16 @@ do_open(OpenMode,State) ->
   case eof(FD) of
     0 ->
       write(FD,[H = mk_header(State)]),
-      Eof = H#header.size;
+      flush_cache(
+        finalize(State#state{
+                   mode=fill_mode(OpenMode),
+                   fd=FD,
+                   eof=H#header.size}));
     Eof ->
-      ok
-  end,
-  State#state{mode=fill_mode(OpenMode),
-              eof=Eof,
-              fd=FD}.
+      State#state{mode=fill_mode(OpenMode),
+                  eof=Eof,
+                  fd=FD}
+  end.
 
 fill_mode(bulk) -> bulk;
 fill_mode(_) -> normal.
@@ -563,8 +568,8 @@ mk_leaf(Recs,Pos) ->
   Bin = to_disk_format_leaf(Recs),
   #node{type=leaf,
         pos=Pos,
-        min_key=element(1,hd(Recs)),
-        max_key=element(1,hd(lists:reverse(Recs))),
+        min_key=case Recs of []->[];_->element(1,hd(Recs))end,
+        max_key=case Recs of []->[];_->element(1,hd(lists:reverse(Recs)))end,
         recs=Recs,
         bin=Bin,
         size=byte_size(Bin)+pad_size(),
