@@ -238,7 +238,8 @@ chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
 
 replace_node(Kid,[NewKid],Dad,_) ->
   case is_smallest(Kid,Dad) of
-    true -> [Dad#node{zero_pos=NewKid#node.pos,min_key=min_key(NewKid,Dad)}];
+    true -> [mk_root(NewKid#node.pos,min_key(NewKid,Dad),
+                     Dad#node.max_key,Dad#node.recs,Dad#node.pos)];
     false-> [replace_rec(Kid,NewKid,Dad)]
   end;
 replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
