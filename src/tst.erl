@@ -238,9 +238,9 @@ chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
 
 replace_node(Kid,[NewKid],Dad,_) ->
   case is_smallest(Kid,Dad) of
-    true -> [mk_root(NewKid#node.pos,min_key(NewKid,Dad),
-                     Dad#node.max_key,Dad#node.recs,Dad#node.pos)];
-    false-> [replace_rec(Kid,NewKid,Dad)]
+    true -> [re_node(Dad#node{zero_pos=NewKid#node.pos,
+                              min_key=min_key(NewKid,Dad)})];
+    false-> [re_node(replace_rec(Kid,NewKid,Dad))]
   end;
 replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
   Dad = replace_node(Kid,[Kid1],OldDad,S),
@@ -252,8 +252,13 @@ replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
       [mk_internal(Z1,M1,Rs1,0),
        mk_internal(Z2,M2,Rs2,0)];
     false->
-      [Dad#node{recs=Recs}]
+      [re_node(Dad#node{recs=Recs})]
   end.
+
+re_node(#node{type=internal,zero_pos=Zp,min_key=Min,recs=Rs,pos=P}) ->
+  mk_internal(Zp,Min,Rs,P);
+re_node(#node{type=root,zero_pos=Zp,min_key=Min,max_key=Max,recs=Rs,pos=P}) ->
+  mk_root(Zp,Min,Max,Rs,P).
 
 is_smallest(#node{min_key=Min0},#node{min_key=Min1}) ->
   Min0 =:= Min1.
