@@ -155,7 +155,7 @@ handle_call(What,_From,OldState) ->
 
 safer(What,State) ->
   try do_safer(What,State)
-  catch C:R -> exit({C,R,erlang:get_stacktrace()})
+  catch C:R -> {{C,R,erlang:get_stacktrace()},State}
   end.
 
 do_safer({first},State)          -> {do_first(State),State};
