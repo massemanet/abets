@@ -239,7 +239,7 @@ chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
 replace_node(Kid,[NewKid],Dad,S) ->
   [re_node(replace_rec(Kid,NewKid,Dad),S)];
 replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
-  Dad = replace_node(Kid,[Kid1],OldDad,S),
+  [Dad] = replace_node(Kid,[Kid1],OldDad,S),
   Recs = lists:sort([{get_min(Kid2),Kid2#node.pos}|Dad#node.recs]),
   case Len =< get_length(Dad) of
     true ->
