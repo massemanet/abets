@@ -208,7 +208,7 @@ do_insert(Key,Val,S) ->
   flush_cache(
     chk_nods(NewLeaves,S#state{cache=[Blob],
                                nodes=Nodes,
-                               max_key=get_max(R,Key),
+                               max_key=max(get_max(R,Key),Key),
                                eof=S#state.eof+Blob#blob.size})).
 
 add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
