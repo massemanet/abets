@@ -222,6 +222,8 @@ add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
      [mk_leaf(Recs,Eof+Blob#blob.size)]
  end.
 
+chk_nods([I1,I2],S = #state{nodes=[OldRoot],cache=Cache}) ->
+  exit({root_split,I1,I2,OldRoot});
 chk_nods([Root],S = #state{nodes=[_],cache=Cache}) ->
   {NewEof,[NewRoot]} = move_pointers([Root],S),
   S#state{cache=Cache++[re_node(NewRoot,S)],
