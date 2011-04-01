@@ -1,15 +1,14 @@
 %% -*- mode: erlang; erlang-indent-level: 2 -*-
-%%% Created :  6 Apr 2010 by Mats Cronqvist <masse@kreditor.se>
+%%% Created : 25 Feb 2011 by mats cronqvist <masse@klarna.com>
 
 %% @doc
 %% @end
 
--module('abets').
--author('Mats Cronqvist').
+-module('tst').
+-author('mats cronqvist').
 
 -export([unit/0, unit/1
-         , wunit/0, wunit/1
-         , do_lookup/2]).
+         , unit_bulk/0, unit_bulk/1]).
 
 -export([handle_call/3
          , init/1
@@ -25,7 +24,46 @@
          , lookup/2
          , bulk/2, bulk/3
          , first/1
+         , last/1
          , next/2]).
+
+-import(erlang,[min/2,max/2]).
+
+-define(SIZE,4).
+
+-record(state,
+        {len=?SIZE,
+         len2=?SIZE*2,
+         eof=0,
+         block_size=2621,
+         name,
+         fd,
+         mode,
+         max_key,
+         cache=[],
+         blobs=[],
+         nodes=[[]]}).
+
+-record(header,
+        {bin,
+         pos,
+         size,
+         preamble}).
+
+-record(blob,
+        {key,
+         data,
+         pos,
+         size,
+         bin}).
+
+-record(node,
+        {type,
+         pos,
+         max_key,
+         size=0,
+         recs=[],
+         bin}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% the api
@@ -40,7 +78,7 @@ new(Tab,Opts) ->
   end.
 
 open(Tab) ->
-  do_new(Tab,open).
+  do_new(Tab,normal).
 
 insert(Tab,Key,Val) ->
   call(Tab,{insert,Key,Val}).
@@ -55,14 +93,16 @@ delete(Tab, Key) ->
   call(Tab,{delete,Key}).
 
 lookup(Tab, Key) ->
-  try {Res} = call(Tab,{lookup,Key}),
-      Res
-  catch _:{badmatch,X} ->
-      throw(X)
+  case call(Tab,{lookup,Key}) of
+    {Res} -> Res;
+    Error -> exit(Error)
   end.
 
 first(Tab) ->
-  call(Tab,first).
+  call(Tab,{first}).
+
+last(Tab) ->
+  call(Tab,{last}).
 
 next(Tab, Key) ->
   call(Tab,{next,Key}).
@@ -90,55 +130,10 @@ assert(Tab) ->
   end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% declarative
-
--define(ORDER2,4).       %order*2
--define(BLOCK_SIZE,2621).%1048576).%
-
--define(HEADER,<<"ABETS v1">>).
-%% file format looks like
-%% [Size,Type,Blob,Type,Size]
--define(TYPE_BYTES, 1).
--define(SIZE_BYTES, 4).
--define(SIZE_BITS, 32).
--define(PAD_BYTES,(?SIZE_BYTES+?TYPE_BYTES)).
-
--define(TYPE_INTERNAL,<<1>>).
--define(TYPE_LEAF,    <<2>>).
--define(TYPE_BINARY,  <<3>>).
--define(TYPE_TERM,    <<4>>).
-
--record(rec,
-       {key
-        , pointer = 0}).
-
--record(internal,
-        {size = 0
-         , type = root  %normal|root
-         , prog
-         , pointer = 0
-         , recs = []}).
-
--record(leaf,
-        {size = 0
-         , recs = []}).
-
--record(state,
-        {fd
-         , bulk_nodes = []
-         , name
-         , regname
-         , filename}).
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% gen_server callbacks
 
-init([open,Tab]) ->
-  do_init(Tab,do_open(Tab));
-init([bulk,Tab]) ->
-  do_init(Tab,do_bulk(Tab));
-init([create,Tab]) ->
-  do_init(Tab,do_create(Tab)).
+init([OpenMode,Name]) ->
+  {ok,do_open(OpenMode,#state{name=Name})}.
 
 terminate(normal,[]) ->
   ok;
@@ -151,21 +146,23 @@ terminate(What,_State) ->
 handle_call(close,_From,_State) ->
   {stop,normal,ok,[]};
 handle_call(destroy,_From,State) ->
-  {stop,normal,ok,State#state.filename};
+  {stop,normal,ok,filename(State#state.name)};
 handle_call(What,_From,OldState) ->
   {Reply,State} = safer(What,OldState),
   {reply,Reply,State}.
 
 safer(What,State) ->
   try do_safer(What,State)
-  catch C:R -> exit({C,R,erlang:get_stacktrace()})
+  catch C:R -> {{C,R,erlang:get_stacktrace()},State}
   end.
 
-do_safer({lookup,Key},State)     -> {do_lookup(Key,State#state.fd),State};
-do_safer({insert,Key,Val},State) -> {do_insert(Key,Val,State#state.fd),State};
-do_safer({bulk,Key,Val},State)   -> do_bulk(Key,Val,State);
-do_safer({bulk,commit},State)    -> do_bulk(commit,State);
-do_safer({decompose,N},State)    -> {do_decompose(N,State#state.fd),State}.
+do_safer({first},State)          -> {do_first(State),State};
+do_safer({last},State)           -> {do_last(State),State};
+do_safer({insert,Key,Val},State) -> {ok,do_insert(Key,Val,State)};
+do_safer({lookup,Key},State)     -> {do_lookup(Key,State),State};
+do_safer({bulk,Key,Val},State)   -> {ok,do_bulk(insert,Key,Val,State)};
+do_safer({bulk,commit},State)    -> {ok,do_bulk(commit,'','',State)};
+do_safer({decompose,N},State)    -> {do_decompose(N,State),State}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_new(Tab,How) ->
@@ -175,268 +172,329 @@ do_new(Tab,How) ->
       gen_server:start({local,regname(Tab)},?MODULE,[How,Tab],[])
   end.
 
-do_init(Tab,{FD,[]}) ->
-  {ok, #state{name = Tab
-              , fd = FD
-              , regname = regname(Tab)
-              , filename = filename(Tab)}};
-do_init(Tab,{FD,Nodes}) ->
-  {ok, #state{name = Tab
-              , fd = FD
-              , regname = regname(Tab)
-              , filename = filename(Tab)
-              , bulk_nodes=Nodes}}.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% B+tree logic
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_decompose(N,State) ->
+  decomp(State,N,read_blob_bw(eof,State),[]).
+
+decomp(State,N,Rec,O)  ->
+  Pos = get_pos(Rec),
+  case N =:= 0 orelse Pos =:= 0 of
+    true -> [{Pos,Rec}|O];
+    false-> decomp(State,N-1,read_blob_bw(Pos,State),[{Pos,Rec}|O])
+  end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_first(State) ->
+  Root = #node{type=root} = read_blob_bw(eof,State),
+  get_min(Root).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_last(State) ->
+  Root = #node{type=root} = read_blob_bw(eof,State),
+  get_max(Root).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_insert(Key,Val,S) ->
+  R = #node{type=root} = read_blob_bw(eof,S),
+  K = max(min(Key,get_max(R,Key)),get_min(R,Key)),
+  Nodes = find_nodes(K,R,[],S),
+  Blob = mk_blob(Key,Val,S#state.eof),
+  NewLeaves = add_blob_to_leaf(S,Blob,hd(Nodes)),
+  flush_cache(
+    chk_nods(NewLeaves,S#state{cache=[Blob],
+                               nodes=Nodes,
+                               max_key=max(get_max(R,Key),Key),
+                               eof=S#state.eof+Blob#blob.size})).
+
+add_blob_to_leaf(#state{len=Len,eof=Eof},Blob,#node{type=leaf,recs=Rs}) ->
+ case Len < length(Recs = lists:sort([{Blob#blob.key,Blob#blob.pos}|Rs])) of
+   true ->
+     {R1s,R2s} = lists:split(Len div 2,Recs),
+     L1=mk_leaf(R1s,Eof+Blob#blob.size),
+     L2=mk_leaf(R2s,Eof+Blob#blob.size+L1#node.size),
+     [L1,L2];
+   false->
+     [mk_leaf(Recs,Eof+Blob#blob.size)]
+ end.
+
+chk_nods([Root],S = #state{nodes=[_],cache=Cache}) ->
+  {NewEof,[NewRoot]} = move_pointers([Root],S),
+  S#state{cache=Cache++[re_node(NewRoot,S)],
+          nodes=[],
+          eof=NewEof};
+chk_nods(Is=[_,_],S = #state{nodes=[_],cache=Cache,max_key=Max}) ->
+  {NewEof,NewIs} = move_pointers(Is,S),
+  Recs = [{get_min(I),I#node.pos} || I <- NewIs],
+  Root = mk_root(Max,Recs,0),
+  chk_nods([Root],S#state{cache=Cache++NewIs,
+                          eof=NewEof});
+chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
+  {NewEof,NewKids} = move_pointers(Kids,S),
+  Dads = replace_node(Kid,NewKids,Dad,S),
+  chk_nods(Dads,S#state{cache=Cache++NewKids,
+                        nodes=[Dad|Grands],
+                        eof=NewEof}).
+
+replace_node(Kid,[NewKid],Dad,S) ->
+  [re_node(replace_rec(Kid,NewKid,Dad),S)];
+replace_node(Kid,[Kid1,Kid2],OldDad,S = #state{len=Len}) ->
+  [Dad] = replace_node(Kid,[Kid1],OldDad,S),
+  Recs = lists:sort([{get_min(Kid2),Kid2#node.pos}|Dad#node.recs]),
+  case Len =< get_length(Dad) of
+    true ->
+      {Rs1,Rs2} = lists:split(length(Recs) div 2,Recs),
+      [mk_internal(Rs1,0),
+       mk_internal(Rs2,0)];
+    false->
+      [re_node(Dad#node{recs=Recs},S)]
+  end.
+
+re_node(#node{type=internal,recs=Rs,pos=P},_) ->
+  mk_internal(Rs,P);
+re_node(#node{type=root,max_key=Max,recs=Rs,pos=P},#state{max_key=Mx}) ->
+  mk_root(max(Mx,Max),Rs,P).
+
+replace_rec(#node{recs=[]},#node{recs=[{K,_}|_],pos=Pos},N=#node{recs=[]}) ->
+  N#node{recs=[{K,Pos}]};
+replace_rec(#node{recs=[{K0,_}|_]},#node{recs=[{K1,_}|_],pos=Pos},N) ->
+  N#node{recs=[maybe_replace_rec(K0,{K1,Pos},{K,P})||{K,P}<-N#node.recs]}.
+
+maybe_replace_rec(K,NewRec,{K,_}) -> NewRec;
+maybe_replace_rec(_,_,OldRec) -> OldRec.
+
+move_pointers(Nodes,#state{eof=Eof}) ->
+  lists:foldl(fun mp_fun/2,{Eof,[]},Nodes).
+
+mp_fun(N = #node{size=Size},{Eof,Nodes}) ->
+  {Eof+Size,Nodes++[N#node{pos=Eof}]}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_lookup(Key,State) ->
+  try
+    [Leaf|_] = find_nodes(Key,State),
+    #blob{data=Data} = read_blob(Key,Leaf,State),
+    {Data}
+  catch
+    _:R -> {not_found,Key,R}
+  end.
+
+read_blob(Key,#node{type=leaf,recs=Recs},State) ->
+  {value,{Key,Pos}} = lists:keysearch(Key,1,Recs),
+  read_blob_fw(Pos,State).
+
+find_nodes(Key,State) ->
+  find_nodes(Key,read_blob_bw(eof,State),[],State).
+
+find_nodes(_,N = #node{type=leaf},O,_) ->
+  [N|O];
+find_nodes(Key,N = #node{type=root,recs=[]},[],_) ->
+  [mk_leaf([],0),N#node{max_key=Key}];
+find_nodes(Key,N = #node{recs=Recs},O,State) ->
+  find_nodes(Key,read_blob_fw(find(Key,Recs),State),[N|O],State).
+
+find(Key,[{K0,P0},{K1,P1}|Recs]) ->
+  case K0 =< Key andalso Key < K1 of
+    true -> P0;
+    false-> find(Key,[{K1,P1}|Recs])
+  end;
+find(_,[{_,P0}]) ->
+  P0.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_bulk(commit,_,_,State)->
+  finalize(State);
+do_bulk(insert,Key,Val,State)->
+  add_blob(Key,Val,State).
+
+add_blob(Key,Val,S = #state{blobs=Blobs}) ->
+  case S#state.len2 =< length(Blobs) of
+    true ->
+      {BlobsH,BlobsT} = lists:split(S#state.len,Blobs),
+      NewLeaf = mk_leaf_bulk(BlobsH,S#state.eof),
+      flush_cache(
+        check_nodes(
+          S#state{nodes=add_leaf(NewLeaf,S),
+                  cache=BlobsH++[NewLeaf],
+                  max_key=max(S#state.max_key,Key),
+                  eof=NewLeaf#node.pos+NewLeaf#node.size,
+                  blobs=BlobsT++[mk_blob(Key,Val,0)]}));
+    false->
+      S#state{blobs=Blobs++[mk_blob(Key,Val,0)],
+              max_key=max(S#state.max_key,Key)}
+  end.
+
+add_leaf(Leaf,#state{nodes=[Leaves|Ints]}) ->
+  [Leaves++[Leaf]|Ints].
+
+check_nodes(S = #state{nodes=Nodes}) ->
+  {NewNodes,NewCache,NewEof} = chk_nodes(Nodes,S),
+  S#state{nodes=NewNodes,
+          cache=S#state.cache++NewCache,
+          eof=NewEof}.
+
+chk_nodes(Nodes,#state{len=S,len2=S2,eof=Eof}) ->
+  chk_nodes(Nodes,{[],[],Eof},{S,S2}).
+
+chk_nodes([],O,_)         -> O;
+chk_nodes([N0s|Nss],{Ns,Cache,Eof},C={S,S2}) ->
+  case S2 < length(N0s) of
+    true ->
+      {NodesH,NodesT} = lists:split(S,N0s),
+      Node = mk_node_bulk(NodesH,Eof),
+      NewEof = Node#node.pos+Node#node.size,
+      chk_nodes(add_node(Node,Nss),{Ns++[NodesT],Cache++[Node],NewEof},C);
+    false->
+      {Ns++[N0s|Nss],Cache,Eof}
+  end.
+
+add_node(N,[]) -> [[N]];
+add_node(N,[Ns|NT]) -> [Ns++[N]|NT].
+
+finalize(S = #state{cache=[],blobs=[],nodes=[[]]}) ->
+  Root = mk_root_bulk([],[],S#state.eof),
+  NewEof = Root#node.pos+Root#node.size,
+  flush_cache(S#state{eof=NewEof,cache=[Root]});
+finalize(S0 = #state{cache=[],blobs=Blobs}) ->
+  case length(Blobs) =< S0#state.len of
+    true ->
+      Leaf = mk_leaf_bulk(Blobs,S0#state.eof),
+      S2 =
+        check_nodes(S0#state{nodes=add_leaf(Leaf,S0),
+                             cache=Blobs++[Leaf],
+                             eof=Leaf#node.pos+Leaf#node.size,
+                             mode=normal,
+                             blobs=[]});
+    false->
+      {Blobs1,Blobs2} = lists:split(length(Blobs) div 2,Blobs),
+      Leaf1 = mk_leaf_bulk(Blobs1,S0#state.eof),
+      S1 =
+        check_nodes(S0#state{nodes=add_leaf(Leaf1,S0),
+                             cache=Blobs1++[Leaf1],
+                             eof=Leaf1#node.pos+Leaf1#node.size,
+                             blobs=Blobs2}),
+      Leaf2 = mk_leaf_bulk(Blobs2,S1#state.eof),
+      S2 =
+        check_nodes(S1#state{nodes=add_leaf(Leaf2,S1),
+                             cache=S1#state.cache++Blobs2++[Leaf2],
+                             eof=Leaf2#node.pos+Leaf2#node.size,
+                             mode=normal,
+                             blobs=[]})
+  end,
+  flush_cache(finalize_nodes(S2)).
+
+finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[Ns]}) ->
+  case length(Ns) =< S#state.len of
+    true ->
+      Root = mk_root_bulk(Ns,S#state.max_key,Eof),
+      NewEof = Root#node.pos+Root#node.size,
+      S#state{eof=NewEof,cache=Cache++[Root],nodes=[]};
+    false->
+      {N1s,N2s} = lists:split(length(Ns) div 2,Ns),
+      Node1 = mk_node_bulk(N1s,Eof),
+      NewEof1 = Node1#node.pos+Node1#node.size,
+      Node2 = mk_node_bulk(N2s,NewEof1),
+      NewEof2 = Node2#node.pos+Node2#node.size,
+      finalize_nodes(S#state{cache=Cache++[Node1,Node2],
+                             nodes=[[Node1,Node2]],
+                             eof=NewEof2})
+  end;
+finalize_nodes(S = #state{eof=Eof,cache=Cache,nodes=[NHs|NTs]}) ->
+  case length(NHs) =< S#state.len of
+    true ->
+      Node = mk_node_bulk(NHs,Eof),
+      NewEof = Node#node.pos+Node#node.size,
+      finalize_nodes(S#state{cache=Cache++[Node],
+                             nodes=add_node(Node,NTs),
+                             eof=NewEof});
+    false->
+      {NH1s,NH2s} = lists:split(length(NHs) div 2,NHs),
+      Node1 = mk_node_bulk(NH1s,Eof),
+      NewEof1 = Node1#node.pos+Node1#node.size,
+      Node2 = mk_node_bulk(NH2s,NewEof1),
+      NewEof2 = Node2#node.pos+Node2#node.size,
+      finalize_nodes(S#state{cache=Cache++[Node1,Node2],
+                             nodes=add_node(Node2,add_node(Node1,NTs)),
+                             eof=NewEof2})
+  end.
+
+mk_root_bulk(Nodes,Max,Pos) ->
+  Recs = [{Min,Ps} || #node{pos=Ps,recs=[{Min,_}|_]} <- Nodes],
+  mk_root(Max,Recs,Pos).
+
+mk_node_bulk(Nodes,Pos) ->
+  Recs = [{Min,Ps} || #node{pos=Ps,recs=[{Min,_}|_]} <- Nodes],
+  mk_internal(Recs,Pos).
+
+mk_leaf_bulk(Blobs,Eof) ->
+  {EOF,Recs} = lists:foldl(fun boff_f/2,{Eof,[]},Blobs),
+  mk_leaf(Recs,EOF).
+
+boff_f(#blob{key=Key,size=Size},{Eof,Recs})->
+  {Eof+Size,Recs++[{Key,Eof}]}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% file ops
+
+-define(TYPE_BYTES, 1).
+-define(SIZE_BYTES, 4).
+-define(SIZE_BITS, 32).
+-define(PAD_BYTES,(?SIZE_BYTES+?TYPE_BYTES)).
+
+-define(TYPE_LEAF_NODE , <<1>>).
+-define(TYPE_INT_NODE  , <<2>>).
+-define(TYPE_ROOT_NODE , <<3>>).
+-define(TYPE_BLOB      , <<4>>).
+-define(TYPE_HEADER    , <<5>>).
+-define(TYPE_TERM      , 6).
+-define(TYPE_BIN       , 7).
+
+do_open(OpenMode,State) ->
+  maybe_delete(OpenMode,State),
+  {ok,FD} = file:open(filename(State#state.name),[read,append,binary,raw]),
+  case eof(FD) of
+    0 ->
+      write(FD,[H = mk_header(State)]),
+      flush_cache(
+        finalize(State#state{
+                   mode=fill_mode(OpenMode),
+                   fd=FD,
+                   eof=H#header.size}));
+    Eof ->
+      State#state{mode=fill_mode(OpenMode),
+                  eof=Eof,
+                  fd=FD}
+  end.
+
+fill_mode(bulk) -> bulk;
+fill_mode(_) -> normal.
+
+maybe_delete(normal,_) -> ok;
+maybe_delete(_,#state{name=Name}) -> file:delete(filename(Name)).
+
+flush_cache(S = #state{fd=FD,cache=Cache}) ->
+  write(FD,Cache),
+  S#state{cache=[]}.
 
 filename(Tab) ->
   atom_to_list(Tab).
 
 regname(Tab) ->
   list_to_atom("abets_"++atom_to_list(Tab)).
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% B+tree logic
 
-%%%
-do_decompose(N,FD) ->
-  decomp(FD,N,read_blob_bw(FD,eof),[]).
+pad_size() ->
+  ?PAD_BYTES+?PAD_BYTES.
 
-decomp(_FD,0,{Term,Pos},O) -> [{Pos,Term}|O];
-decomp(_FD,_N,{Term,0},O)  -> [{0,Term}|O];
-decomp(FD,N,{Term,Pos},O)  ->
-  decomp(FD,N-1,read_blob_bw(FD,Pos),[{Pos,Term}|O]).
-
-%%%
-do_lookup(Key,FD) ->
-  find(FD,Key,read_blob_bw(FD,eof)).
-
-find(FD,Key,{Node,_}) ->
-  case Node of
-    #internal{pointer=Pointer,recs=Recs} ->
-      find(FD,Key,read_blob_fw(FD,new_pos(Key,Recs,Pointer)));
-    #leaf{recs=Recs} ->
-      case lists:keysearch(Key,2,Recs) of
-        {value,#rec{pointer=Pointer}} -> {element(1,read_blob_fw(FD,Pointer))};
-        false -> {error,{no_hit,Key}}
-      end
-  end.
-
-find_path(Key,FD) ->
-  find_path(FD,Key,read_blob_bw(FD,eof),[]).
-
-find_path(FD,Key,{Node,_},O) ->
-  case Node of
-    #internal{pointer=Pointer,recs=Recs} ->
-      find_path(FD,Key,read_blob_fw(FD,new_pos(Key,Recs,Pointer)),[Node|O]);
-    #leaf{} ->
-      [Node|O]
-  end.
-
-new_pos(_Key,[],Pos)                          -> Pos;
-new_pos(Key,[#rec{key=K}|_],Pos) when Key < K -> Pos;
-new_pos(Key,Recs,_)                           -> new_pos(Key,Recs).
-
-new_pos(_Key,[#rec{pointer=Pos}])                           -> Pos;
-new_pos(Key,[#rec{pointer=Pos},#rec{key=K}|_]) when Key < K -> Pos;
-new_pos(Key,[_|Recs])                                       -> new_pos(Key,Recs).
-
-%%% commit bulk cache and exit bulk mode
-do_bulk(commit,State = #state{fd=FD,bulk_nodes=[Leaf|Nodes]}) ->
-  cache_flush(),
-  insert_node([Leaf],epos(FD),Nodes),
-  cache_commit(FD),
-  {ok,State#state{bulk_nodes=[]}}.
-
-%%% insert a new rec in bulk mode
-do_bulk(_,_,State = #state{name=Name,bulk_nodes=[]}) ->
-  {{not_in_bulk_mode,Name},State};
-do_bulk(Key,Val,State = #state{fd=FD,bulk_nodes=OldNodes}) ->
-  cache_flush(),
-  {Bin,Type,Size} = pack_val(Val),
-  cache_add({Type,Bin}),
-  Nodes = maybe_flush_nodes(Key,epos(FD),Size,OldNodes),
-  cache_commit(FD),
-  {ok,State#state{bulk_nodes=Nodes}}.
-
-maybe_flush_nodes(Key,Pos,Size,Nodes) ->
-  Nodes.
-
-%%% insert new rec by writing the value and rebuilding the nodes above
-%%% and including the rec's leaf
-do_insert(Key,Val,FD) ->
-  cache_flush(),
-  {Bin,Type,Size} = pack_val(Val),
-  cache_add({Type,Bin}),
-  insert_rec_in_leaf(Key,epos(FD),Size,find_path(Key,FD)),
-  cache_commit(FD).
-
-%% insert rec in leaf and rebuild the leaf's parents
-insert_rec_in_leaf(Key,Pos,Size,[Leaf|Nodes]) ->
-  insert_node(update_node([#rec{key=Key,pointer=Pos}],Leaf),Pos+Size,Nodes).
-
-% node is the root
-insert_node([Node],Pos,[]) ->
-  pack_node(Pos,Node);
-%% the root has split
-insert_node([XNode,YNode],Pos,[]) ->
-  {_XRec,XSize} = pack_node(Pos,XNode),
-  {_YRec,YSize} = pack_node(Pos+XSize,YNode),
-  pack_node(Pos+XSize+YSize,split_root(YNode,Pos,XSize));
-%% XNode is a new child of OldNode
-insert_node([XNode],Pos,[OldNode|Nodes]) ->
-  {Rec,Size} = pack_node(Pos,XNode),
-  insert_node(update_node([Rec],OldNode),Pos+Size,Nodes);
-%% OldNode has 2 new kids, XNode and YNode
-insert_node([XNode,YNode],Pos,[OldNode|Nodes]) ->
-  {XRec,XSize} = pack_node(Pos,XNode),
-  {YRec,YSize} = pack_node(Pos+XSize,YNode),
-  insert_node(update_node([XRec,YRec],OldNode),Pos+XSize+YSize,Nodes).
-
-split_root(YNode,XPos,YSize) ->
-  #internal{size=2,pointer=XPos,
-            recs=[#rec{key=YNode#internal.prog,
-                       pointer=XPos+YSize}]}.
-
-%% insert a rec in a leaf
-update_node([Rec],Node = #leaf{recs=OldRecs}) ->
-  Size = length(Recs = new_recs_leaf(Rec,OldRecs)),
-  maybe_split(Node#leaf{size=Size,recs=Recs});
-%% insert a rec in an empty internal node
-update_node([#rec{pointer=Pointer}],Node = #internal{recs=[]}) ->
-  [Node#internal{size=1,pointer=Pointer}];
-%% insert an empty rec in an empty internal node
-update_node([Pointer],Node = #internal{recs=[]}) when is_integer(Pointer) ->
-  [Node#internal{size=0,pointer=Pointer}];
-%% insert 2 recs in an empty internal node
-update_node([R1,R2], Node = #internal{recs=[]}) ->
-  [Node#internal{size=2,pointer=R1#rec.pointer,recs=[R2]}];
-%% insert a rec in an existing internal node
-update_node([R0],Node = #internal{recs=Recs}) ->
-  case is_leftmost(R0,Recs) of
-    true -> [Node#internal{pointer=R0#rec.pointer}];
-    false-> [Node#internal{recs = new_recs_internal(R0,Recs)}]
-  end;
-%% insert 2 recs in an existing internal rec
-update_node([R1,R2],Node = #internal{recs=Recs}) ->
-  case is_leftmost(R1, Recs) of
-    true ->
-      Size = length(Rs = [R2|Recs])+1,
-      maybe_split(Node#internal{size=Size,pointer=R1#rec.pointer,recs=Rs});
-    false->
-      Rs = grow_recs(Recs,R1,R2),
-      maybe_split(Node#internal{size=length(Rs)+1,recs=Rs})
-  end.
-
-is_leftmost(R,[R0|_]) ->
-  R#rec.key =:= undefined orelse R#rec.key < R0#rec.key.
-
-% here we either replace a record (if the key exists), or grow the record list
-new_recs_leaf(R,[])                                   -> [R];
-new_recs_leaf(R=#rec{key=K},[#rec{key=K}|Recs])       -> [R|Recs];
-new_recs_leaf(R0=#rec{key=K0},[R1=#rec{key=K1}|Recs]) ->
-  case K0 < K1 of
-    true -> [R0,R1|Recs];
-    false-> [R1|new_recs_leaf(R0,Recs)]
-  end.
-
-%% here we make the record list longer
-grow_recs([_],R1,R2) ->
-  [R1,R2];
-grow_recs([R0,Rn|Recs],R1,R2) ->
-  case R1#rec.key < Rn#rec.key of
-    true -> [R1,R2,Rn|Recs];
-    false-> [R0|grow_recs([Rn|Recs],R1,R2)]
-  end.
-
-% here we replace a record. the record list does not grow
-new_recs_internal(#rec{pointer=Pointer},[Rec]) ->
-  [Rec#rec{pointer=Pointer}];
-new_recs_internal(R0 = #rec{key=K0,pointer=Pointer},[R1,R2|Recs]) ->
-  case K0 < R2#rec.key of
-    true -> [R1#rec{pointer=Pointer},R2|Recs];
-    false-> [R1|new_recs_internal(R0,[R2|Recs])]
-  end.
-
-maybe_split(Node) ->
-  case node_size(Node) =< ?ORDER2 of
-    true -> [Node];
-    false-> split(Node)
-  end.
-
-split(Node = #internal{recs=Recs}) ->
-  {A,[H|T]} = lists:split(length(Recs) div 2,Recs),
-  [Node#internal{type=normal,size=length(A)+1,recs=A},
-   Node#internal{type=normal,size=length(T)+1,
-                 prog=H#rec.key,pointer=H#rec.pointer,recs=T}];
-
-split(Node = #leaf{recs=Recs}) ->
-  {A,B} = lists:split(length(Recs) div 2,Recs),
-  [Node#leaf{size=length(A),recs=A},
-   Node#leaf{size=length(B),recs=B}].
-
-node_size(#internal{size=Size}) -> Size;
-node_size(    #leaf{size=Size}) -> Size.
-
-pack_node(Pos,Node) ->
-  {Bin,Type,Size} = pack_val(Node),
-  cache_add({Type,Bin}),
-  {node_to_rec(Node,Pos),Size}.
-
-node_to_rec(#internal{prog=Key},Pointer) -> #rec{key=Key,pointer=Pointer};
-node_to_rec(#leaf{recs=[]},Pointer)      -> Pointer;
-node_to_rec(#leaf{recs=Recs},Pointer)    -> node_to_rec(hd(Recs),Pointer);
-node_to_rec(#rec{key=Key},Pointer)       -> #rec{key=Key,pointer=Pointer}.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% file ops
-
-do_bulk(Tab) ->
-  file:delete(filename(Tab)),
-  {FD,[]} = do_open(Tab),
-  write(FD,[{?TYPE_BINARY,?HEADER}]),
-  {FD,[#leaf{},#internal{}]}.
-
-do_create(Tab) ->
-  file:delete(filename(Tab)),
-  {FD,[]} = do_open(Tab),
-  Pointer = byte_size(?HEADER)+?PAD_BYTES+?PAD_BYTES,
-  {LeafBin,LeafType,_} = pack_val(#leaf{}),
-  {RootBin,RootType,_} = pack_val(#internal{pointer=Pointer}),
-  write(FD,[{?TYPE_BINARY,?HEADER},{LeafType,LeafBin},{RootType,RootBin}]),
-  {FD,[]}.
-
-do_open(Tab) ->
-  {ok,FD} = file:open(filename(Tab),[read,append,binary,raw]),
-  {FD,[]}.
-
-write(FD,IOlist) ->
-  ok = file:write(FD,[wrap(E) || E <- IOlist]),
-%  file:sync(FD),
-  ok.
-
-%% pos @ eof
-epos(FD) ->
-  {ok,Pos} = file:position(FD,eof),
-  Pos.
-
-cache_flush() ->
-  erase(cache).
-cache_commit(FD) ->
-  write(FD,lists:reverse(get(cache))).
-cache_add(Term) ->
-  case get(cache) of
-    undefined -> put(cache,[Term]);
-    Terms     -> put(cache,[Term|Terms])
-  end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% disk format
 
-wrap({Type,Binary}) when is_binary(Binary) ->
-  BS = byte_size(Binary),
-  Sz = <<BS:?SIZE_BITS/integer>>,
-  [Sz,Type,Binary,Type,Sz].
-
-read_blob_bw(FD,eof) -> read_blob_bw(FD,epos(FD));
-read_blob_bw(FD,End) ->
-  {Ptr,Size,Bin} = read(FD,erlang:max(0,End-?BLOCK_SIZE),End),
+read_blob_bw(eof,State) -> read_blob_bw(eof(State#state.fd),State);
+read_blob_bw(End,#state{fd=FD,block_size=BSIZE}) ->
+  {Ptr,Size,Bin} = read(FD,erlang:max(0,End-BSIZE),End),
   [exit({bin_error1,{Size}}) || Size < ?TYPE_BYTES+?SIZE_BYTES],
   Off = Size-?TYPE_BYTES-?SIZE_BYTES,
   <<_:Off/binary,Type:?TYPE_BYTES/binary,BS:?SIZE_BITS/integer>> = Bin,
@@ -444,69 +502,21 @@ read_blob_bw(FD,End) ->
   Of = Size-BS-(?PAD_BYTES+?PAD_BYTES),
   <<_:Of/binary,_:?PAD_BYTES/binary,BT:BS/binary,_:?PAD_BYTES/binary>> = Bin,
   [exit({bin_error3,{Size,BS}}) || Ptr+Of =/= End-(BS+?PAD_BYTES+?PAD_BYTES)],
-  {unpack(Type,BT),Ptr+Of}.
+  unwrap(Type,BT,Ptr+Of).
 
-% case get(read_cache) of
-%   {CPtr,CSize,CBin} when CPtr+?SIZE_BYTES < End, End =< CPtr+CSize ->
-%     Len = End-CPtr-?SIZE_BYTES,
-%     Off = CSize-Len-?SIZE_BYTES,
-%     <<B:Len/binary,Size:?SIZE_BITS/integer,_:Off/binary>> = CBin,
-%     case Size+?TYPE_BYTES =< Len of
-%       true ->
-%         O = Len-Size-?TYPE_BYTES,
-%         <<_:O/binary,BT:Size/binary,Type:?TYPE_BYTES/binary>> = B,
-%         {unpack(Type,BT),CPtr+O-?TYPE_BYTES-?SIZE_BYTES};
-%       false->
-%         case ?BLOCK_SIZE < End of
-%           true -> read(FD,End-?BLOCK_SIZE,End);
-%           false-> read(FD,End-Size-?PADDING,End)
-%         end,
-%         read_blob_bw(FD,End)
-%     end;
-%   _ ->
-%     case End < ?BLOCK_SIZE of
-%       true -> Beg = 0;
-%       false-> Beg = End-?BLOCK_SIZE
-%     end,
-%     read(FD,Beg,End),
-%     read_blob_bw(FD,End)
-% end.
 
-read_blob_fw(FD,Beg) ->
-  {Beg,Size,Bin} = read(FD,Beg,Beg+?BLOCK_SIZE),
+read_blob_fw(Beg,#state{fd=FD,block_size=BSIZE}) ->
+  {Beg,Size,Bin} = read(FD,Beg,Beg+BSIZE),
   [exit({blob_error,{Size}}) || Size < ?PAD_BYTES],
   <<Sz:?SIZE_BITS/integer,Type:?TYPE_BYTES/binary,_/binary>> = Bin,
   [exit({blob_error,{Size,Sz}}) || Size < Sz+?PAD_BYTES],
   <<_:?PAD_BYTES/binary,BT:Sz/binary,_/binary>> = Bin,
-  {unpack(Type,BT),Beg}.
+  unwrap(Type,BT,Beg).
 
-% read_blob_fw(FD,Beg) ->
-%   case get(read_cache) of
-%     {CPtr,CSize,CBin} when CPtr =< Beg, Beg < CPtr+CSize-?SIZE_BYTES ->
-%       Off = Beg-CPtr,
-%       <<_:Off/binary,Size:?SIZE_BITS/integer,B/binary>> = CBin,
-%       Len = byte_size(B),
-%       case Size+?TYPE_BYTES < Len of
-%         true ->
-%           <<Type:?TYPE_BYTES/binary,BT:Size/binary,_/binary>> = B,
-%           {unpack(Type,BT),Beg};
-%         false->
-%           End = Beg+Size+?PAD_BYTES+?PAD_BYTES,
-%           case ?BLOCK_SIZE < End of
-%             true -> Start = 0, Stop = ?BLOCK_SIZE;
-%             false-> Start = End-?BLOCK_SIZE, Stop = End
-%           end,
-%           read(FD,Start,Stop),
-%           read_blob_fw(FD,Beg)
-%       end;
-%     _ ->
-%       case (Epos = epos(FD)) < Beg+?BLOCK_SIZE of
-%         true -> Start = lists:max([0,Epos-?BLOCK_SIZE]),Stop = Epos;
-%         false-> Start = Beg,                            Stop = Beg+?BLOCK_SIZE
-%       end,
-%       read(FD,Start,Stop),
-%       read_blob_fw(FD,Beg)
-%   end.
+write(FD,IOlist) ->
+  ok = file:write(FD,[wrap(E) || E <- IOlist]),
+%  file:sync(FD),
+  ok.
 
 read(FD,Beg,End) ->
   [exit({read_error,{Beg}}) || Beg < 0],
@@ -514,75 +524,191 @@ read(FD,Beg,End) ->
   {ok,Bin} = file:pread(FD,Beg,End-Beg),
   Size = byte_size(Bin),
   {Beg,Size,Bin}.
-%  put(read_cache,{Beg,Size,Bin}).
 
-unpack(Type,B) ->
+wrap(Rec) ->
+  Type = type(Rec),
+  Binary = get_bin(Rec),
+  BS = byte_size(Binary),
+  Sz = <<BS:?SIZE_BITS/integer>>,
+  [Sz,Type,Binary,Type,Sz].
+
+unwrap(Type,B,Pos) ->
   case Type of
-    ?TYPE_BINARY -> B;
-    _            -> binary_to_term(B)
+    ?TYPE_LEAF_NODE -> from_disk_format_leaf(B,Pos);
+    ?TYPE_INT_NODE  -> from_disk_format_internal(B,Pos);
+    ?TYPE_ROOT_NODE -> from_disk_format_root(B,Pos);
+    ?TYPE_BLOB      -> from_disk_format_blob(B,Pos);
+    ?TYPE_HEADER    -> from_disk_format_header(B,Pos)
   end.
 
-pack_val(Val) ->
-  Bin = to_binary(Val),
-  {Bin,
-   type(Val),
-   byte_size(Bin)+?PAD_BYTES+?PAD_BYTES}.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+from_disk_format_blob(<<?TYPE_BIN:8/integer,Bin/binary>>,Pos) ->
+  #blob{data=Bin,pos=Pos};
+from_disk_format_blob(<<?TYPE_TERM:8/integer,Bin/binary>>,Pos) ->
+  #blob{data=binary_to_term(Bin),pos=Pos}.
 
-type(#internal{})         -> ?TYPE_INTERNAL;
-type(#leaf{})             -> ?TYPE_LEAF;
-type(B) when is_binary(B) -> ?TYPE_BINARY;
-type(_)                   -> ?TYPE_TERM.
+mk_blob(Key,Val,Pos) ->
+  Bin = to_disk_format_blob(Val),
+  #blob{key=Key,
+        data=Val,
+        pos=Pos,
+        bin=Bin,
+        size=byte_size(Bin)+pad_size()}.
 
+to_disk_format_blob(Bin) when is_binary(Bin) ->
+  <<?TYPE_BIN:8/integer,Bin/binary>>;
+to_disk_format_blob(Val) ->
+  Bin=to_binary(Val),
+  <<?TYPE_TERM:8/integer,Bin/binary>>.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+from_disk_format_leaf(Bin,Pos) ->
+  Recs = binary_to_term(Bin),
+  mk_leaf(Recs,Pos).
+
+mk_leaf(Recs,Pos) ->
+  Bin = to_disk_format_leaf(Recs),
+  #node{type=leaf,
+        pos=Pos,
+        max_key=case Recs of []->[];_->element(1,hd(lists:reverse(Recs)))end,
+        recs=Recs,
+        bin=Bin,
+        size=byte_size(Bin)+pad_size()}.
+
+to_disk_format_leaf(Recs) ->
+  to_binary(Recs).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+from_disk_format_internal(Bin,Pos) ->
+  {Recs} = binary_to_term(Bin),
+  mk_internal(Recs,Pos).
+
+mk_internal(Recs,Pos) ->
+  Bin = to_disk_format_internal(Recs),
+  #node{type=internal,
+        pos=Pos,
+        size=byte_size(Bin)+pad_size(),
+        bin=Bin,
+        recs=Recs}.
+
+to_disk_format_internal(Recs) ->
+  to_binary({Recs}).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+from_disk_format_root(Bin,Pos) ->
+  {Max,Recs} = binary_to_term(Bin),
+  mk_root(Max,Recs,Pos).
+
+mk_root(Max,Recs,Pos) ->
+  Bin = to_disk_format_root(Max,Recs),
+  #node{type=root,
+        pos=Pos,
+        max_key=Max,
+        size=byte_size(Bin)+pad_size(),
+        bin=Bin,
+        recs=Recs}.
+
+to_disk_format_root(Max,Recs) ->
+  to_binary({Max,Recs}).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+from_disk_format_header(Bin,Pos) ->
+  Preamble = binary_to_term(Bin),
+  mk_header(Preamble,Pos).
+
+mk_header(#state{}) ->
+  mk_header("ABETS v1",0).
+
+mk_header(Preamble,Pos) ->
+  Bin = to_disk_format_header(Preamble),
+  #header{preamble=Preamble,
+          pos=Pos,
+          bin=Bin,
+          size=byte_size(Bin)+pad_size()}.
+
+to_disk_format_header(Preamble) ->
+  term_to_binary(Preamble).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 to_binary(Term) ->
   term_to_binary(Term,[{compressed,3},{minor_version,1}]).
 
+eof(FD) ->
+  {ok,Pos} = file:position(FD,eof),
+  Pos.
+
+get_min(N,K) ->
+  try get_min(N)
+  catch _:_ -> K
+  end.
+
+get_min(#node{recs=[{Min,_}|_]}) -> Min.
+
+get_max(N,K) ->
+  try get_max(N)
+  catch _:_ -> K
+  end.
+
+get_max(#node{recs=[_|_],max_key=Max}) -> Max.
+
+get_length(#node{type=leaf,recs=Recs})     -> length(Recs);
+get_length(#node{type=internal,recs=Recs}) -> length(Recs)+1;
+get_length(#node{type=root,recs=Recs})     -> length(Recs)+1.
+
+get_bin(#header{bin=Bin}) -> Bin;
+get_bin(#node{bin=Bin})   -> Bin;
+get_bin(#blob{bin=Bin})   -> Bin.
+
+get_pos(#header{pos=Pos}) -> Pos;
+get_pos(#node{pos=Pos})   -> Pos;
+get_pos(#blob{pos=Pos})   -> Pos.
+
+type(#node{type=leaf})    -> ?TYPE_LEAF_NODE;
+type(#node{type=internal})-> ?TYPE_INT_NODE;
+type(#node{type=root})    -> ?TYPE_ROOT_NODE;
+type(#blob{})             -> ?TYPE_BLOB;
+type(#header{})           -> ?TYPE_HEADER.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% ad-hoc unit testing
+
+unit_bulk() ->
+  unit_bulk(33).
+
+unit_bulk(M) ->
+  [(fun ubf/1)(N) || N <- lists:seq(1,M)],
+  ok.
+
+ubf(M)->
+  Seq=lists:seq(1,M),
+  catch tst:destroy(foo),
+  tst:new(foo,[bulk]),
+  [tst:bulk(foo,{k,N},{v,N})||N<-Seq],
+  tst:bulk(foo,commit),
+  [try {v,N}=tst:lookup(foo,{k,N})
+   catch _:R->exit({R,N,lists:last(Seq)})
+   end || N <- Seq].
 
 unit() ->
   unit(10000).
 
 unit(N) when is_integer(N) -> unit(shuffle(lists:seq(1,N)));
 unit(L) when is_list(L) ->
-  catch abets:destroy(foo),
-  io:fwrite("length: ~p~n",[length(L)]),
-  abets:new(foo),
-  [abets:insert(foo,E,{tobbe,E}) || E <- L],
-  try length([{tobbe,E}=abets:lookup(foo,E) || E <- L])
+  catch destroy(foo),
+  new(foo),
+  try [unit(E,L) || E <- L],length(L)
   catch _:R -> R
   end.
 
-shuffle(L) ->
-  [V||{_,V}<-lists:sort([{random:uniform(),E}||E<-L])].
-
-% qc() ->
-%   ?FORALL(L,
-%           ?SIZED(S,resize(S*S*S*S,list(int()))),
-%           abets:unit(L)==length(L)).
-
-wunit() -> wunit(10000).
-
-wunit(N) when is_integer(N) -> wunit(shuffle(lists:seq(1,N)));
-wunit(L) when is_list(L) ->
-  catch abets:destroy(foo),
-  abets:new(foo),
-  try [wunit(E,L) || E <- L],length(L)
-  catch _:R -> R
-  after abets:close(foo)
-  end.
-
-wunit(E,L) ->
-  abets:insert(foo,E,{tobbe,E}),
+unit(E,L) ->
+  insert(foo,E,{tobbe,E}),
   Ss = sub(L,E),
-  try length([{tobbe,I}=abets:lookup(foo,I) || I <- Ss])
+  try length([{tobbe,I}=lookup(foo,I) || I <- Ss])
   catch _:R -> exit({R,E,Ss})
   end.
 
 sub([E|_],E) -> [E];
 sub([H|T],E) -> [H|sub(T,E)].
 
-
-%% counters;
-%% [1,2,3,4,5,7,8,9,10,11,12,6]
-%% [5,20,15,10,4,11,6,16,19,8,13,14,2,17,18,12,3,1,7,9]
+shuffle(L) ->
+  [V||{_,V}<-lists:sort([{random:uniform(),E}||E<-L])].
