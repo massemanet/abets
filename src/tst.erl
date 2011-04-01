@@ -698,7 +698,6 @@ unit(L) when is_list(L) ->
   new(foo),
   try [unit(E,L) || E <- L],length(L)
   catch _:R -> R
-  after close(foo)
   end.
 
 unit(E,L) ->
