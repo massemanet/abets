@@ -8,8 +8,6 @@
 -author('mats cronqvist').
 
 -export([unit/0, unit/1
-         , wunit/0, wunit/1
-         , unit_bulk_small/0
          , unit_bulk/0, unit_bulk/1]).
 
 -export([handle_call/3
@@ -675,10 +673,7 @@ type(#header{})           -> ?TYPE_HEADER.
 %% ad-hoc unit testing
 
 unit_bulk() ->
-  catch destroy(foo),
-  new(foo,[bulk]),
-  [bulk(foo,N,{mange,N})||N<-[10,11,12,13,14,15,16,17,18,19,20,21,22]],
-  bulk(foo,commit).
+  unit_bulk(33).
 
 unit_bulk(M) ->
   [(fun ubf/1)(N) || N <- lists:seq(1,M)],
@@ -694,40 +689,19 @@ ubf(M)->
    catch _:R->exit({R,N,lists:last(Seq)})
    end || N <- Seq].
 
-unit_bulk_small() ->
-  catch destroy(foo),
-  new(foo,[bulk]),
-  [bulk(foo,N,{mange,N})||N<-[10,11,12,13]],
-  bulk(foo,commit).
-
 unit() ->
   unit(10000).
 
 unit(N) when is_integer(N) -> unit(shuffle(lists:seq(1,N)));
 unit(L) when is_list(L) ->
   catch destroy(foo),
-  io:fwrite("length: ~p~n",[length(L)]),
   new(foo),
-  [insert(foo,E,{tobbe,E}) || E <- L],
-  try length([{tobbe,E}=lookup(foo,E) || E <- L])
-  catch _:R -> R
-  end.
-
-shuffle(L) ->
-  [V||{_,V}<-lists:sort([{random:uniform(),E}||E<-L])].
-
-wunit() -> wunit(10000).
-
-wunit(N) when is_integer(N) -> wunit(shuffle(lists:seq(1,N)));
-wunit(L) when is_list(L) ->
-  catch destroy(foo),
-  new(foo),
-  try [wunit(E,L) || E <- L],length(L)
+  try [unit(E,L) || E <- L],length(L)
   catch _:R -> R
   after close(foo)
   end.
 
-wunit(E,L) ->
+unit(E,L) ->
   insert(foo,E,{tobbe,E}),
   Ss = sub(L,E),
   try length([{tobbe,I}=lookup(foo,I) || I <- Ss])
@@ -736,3 +710,6 @@ wunit(E,L) ->
 
 sub([E|_],E) -> [E];
 sub([H|T],E) -> [H|sub(T,E)].
+
+shuffle(L) ->
+  [V||{_,V}<-lists:sort([{random:uniform(),E}||E<-L])].
