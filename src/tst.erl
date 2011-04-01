@@ -232,8 +232,8 @@ chk_nods(Is=[_,_],S = #state{nodes=[_],cache=Cache,max_key=Max}) ->
   chk_nods([Root],S#state{cache=Cache++NewIs,
                           eof=NewEof});
 chk_nods(Kids,S = #state{cache=Cache,nodes=[Kid,Dad|Grands]}) ->
-  Dads = replace_node(Kid,Kids,Dad,S),
   {NewEof,NewKids} = move_pointers(Kids,S),
+  Dads = replace_node(Kid,NewKids,Dad,S),
   chk_nods(Dads,S#state{cache=Cache++NewKids,
                         nodes=[Dad|Grands],
                         eof=NewEof}).
