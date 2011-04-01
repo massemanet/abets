@@ -4,7 +4,7 @@
 %% @doc
 %% @end
 
--module('tst').
+-module('abets').
 -author('mats cronqvist').
 
 -export([unit/0, unit/1
@@ -681,11 +681,11 @@ unit_bulk(M) ->
 
 ubf(M)->
   Seq=lists:seq(1,M),
-  catch tst:destroy(foo),
-  tst:new(foo,[bulk]),
-  [tst:bulk(foo,{k,N},{v,N})||N<-Seq],
-  tst:bulk(foo,commit),
-  [try {v,N}=tst:lookup(foo,{k,N})
+  catch destroy(foo),
+  new(foo,[bulk]),
+  [bulk(foo,{k,N},{v,N})||N<-Seq],
+  bulk(foo,commit),
+  [try {v,N}=lookup(foo,{k,N})
    catch _:R->exit({R,N,lists:last(Seq)})
    end || N <- Seq].
 
