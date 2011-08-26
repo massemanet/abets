@@ -156,10 +156,11 @@ safer(What,State) ->
   catch C:R -> {{C,R,erlang:get_stacktrace()},State}
   end.
 
-do_safer({first},State)          -> {do_first(State),State};
-do_safer({last},State)           -> {do_last(State),State};
 do_safer({insert,Key,Val},State) -> {ok,do_insert(Key,Val,State)};
 do_safer({lookup,Key},State)     -> {do_lookup(Key,State),State};
+do_safer({delete,Key},State)     -> {do_delete(Key,State),State};
+do_safer({first},State)          -> {do_first(State),State};
+do_safer({last},State)           -> {do_last(State),State};
 do_safer({bulk,Key,Val},State)   -> {ok,do_bulk(insert,Key,Val,State)};
 do_safer({bulk,commit},State)    -> {ok,do_bulk(commit,'','',State)};
 do_safer({decompose,N},State)    -> {do_decompose(N,State),State}.
@@ -271,6 +272,29 @@ move_pointers(Nodes,#state{eof=Eof}) ->
 mp_fun(N = #node{size=Size},{Eof,Nodes}) ->
   {Eof+Size,Nodes++[N#node{pos=Eof}]}.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_delete(Key,State) ->
+  try
+    deleter(Key,State)
+  catch
+    _:R -> {not_found,Key,R,erlang:get_stacktrace()}
+  end.
+
+deleter(Key,S) ->
+  R = #node{type=root} = read_blob_bw(eof,S),
+  K = max(min(Key,get_max(R,Key)),get_min(R,Key)),
+  Nodes = find_nodes(K,R,[],S),
+  flush_cache(
+    chk_nods([nullify(Key,hd(Nodes))],
+             S#state{cache=[],
+                     nodes=Nodes,
+                     max_key=max(get_max(R,Key),Key)})).
+
+nullify(Key,Leaf = #node{recs=Recs}) ->
+  Leaf#node{recs = nlf(Key,Recs)}.
+
+nlf(Key,[{Key,_}|R]) -> [{Key,0}|R];
+nlf(Key,[I|R])       -> [I|nlf(Key,R)].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_lookup(Key,State) ->
   try
