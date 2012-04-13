@@ -1,0 +1,10 @@
+{application, abets,
+ [
+  {description, "Append-only disk-resident btree"},
+  {vsn, "0.1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib
+                 ]}
+ ]}.
