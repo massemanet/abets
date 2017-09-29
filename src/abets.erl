@@ -4,11 +4,10 @@
 %% @doc
 %% @end
 
+-compile({no_auto_import,[max/2, min/2]}).
+
 -module('abets').
 -author('mats cronqvist').
-
--export([unit/0, unit/1
-         , unit_bulk/0, unit_bulk/1]).
 
 -export([handle_call/3
          , init/1
@@ -158,6 +157,7 @@ safer(What,State) ->
 
 do_safer({insert,Key,Val},State) -> {ok,do_insert(Key,Val,State)};
 do_safer({lookup,Key},State)     -> {do_lookup(Key,State),State};
+do_safer({next,Key},State)       -> {do_next(Key,State),State};
 do_safer({delete,Key},State)     -> {do_delete(Key,State),State};
 do_safer({first},State)          -> {do_first(State),State};
 do_safer({last},State)           -> {do_last(State),State};
@@ -299,15 +299,20 @@ nlf(Key,[I|R])       -> [I|nlf(Key,R)].
 do_lookup(Key,State) ->
   try
     [Leaf|_] = find_nodes(Key,State),
-    #blob{data=Data} = read_blob(Key,Leaf,State),
+    {Key, #blob{data=Data}} = read_blob(Key,Leaf,State),
     {Data}
   catch
     _:R -> {not_found,Key,R}
   end.
 
-read_blob(Key,#node{type=leaf,recs=Recs},State) ->
-  {value,{Key,Pos}} = lists:keysearch(Key,1,Recs),
-  read_blob_fw(Pos,State).
+do_next(Key,State) ->
+  try
+    [Leaf|_] = find_nodes(Key,State),
+    {K, #blob{data=Data}} = read_blob(Key,Leaf,State),
+    {K, Data}
+  catch
+    _:R -> {not_found,Key,R}
+  end.
 
 find_nodes(Key,State) ->
   find_nodes(Key,read_blob_bw(eof,State),[],State).
@@ -327,6 +332,13 @@ find(Key,[{K0,P0},{K1,P1}|Recs]) ->
 find(_,[{_,P0}]) ->
   P0.
 
+read_blob(Key,#node{type=leaf,recs=Recs},State) ->
+  {K,Pos} = drop_until(Key,Recs),
+  {K, read_blob_fw(Pos,State)}.
+
+drop_until(K, [{K0,V}|_]) when K =< K0 -> {K0, V};
+drop_until(K, [_|KVs]) -> drop_until(K, KVs);
+drop_until(K, []) ->  exit({not_found, K}).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_bulk(commit,_,_,State)->
   finalize(State);
@@ -692,47 +704,3 @@ type(#node{type=internal})-> ?TYPE_INT_NODE;
 type(#node{type=root})    -> ?TYPE_ROOT_NODE;
 type(#blob{})             -> ?TYPE_BLOB;
 type(#header{})           -> ?TYPE_HEADER.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% ad-hoc unit testing
-
-unit_bulk() ->
-  unit_bulk(33).
-
-unit_bulk(M) ->
-  [(fun ubf/1)(N) || N <- lists:seq(1,M)],
-  ok.
-
-ubf(M)->
-  Seq=lists:seq(1,M),
-  catch destroy(foo),
-  new(foo,[bulk]),
-  [bulk(foo,{k,N},{v,N})||N<-Seq],
-  bulk(foo,commit),
-  [try {v,N}=lookup(foo,{k,N})
-   catch _:R->exit({R,N,lists:last(Seq)})
-   end || N <- Seq].
-
-unit() ->
-  unit(10000).
-
-unit(N) when is_integer(N) -> unit(shuffle(lists:seq(1,N)));
-unit(L) when is_list(L) ->
-  catch destroy(foo),
-  new(foo),
-  try [unit(E,L) || E <- L],length(L)
-  catch _:R -> R
-  end.
-
-unit(E,L) ->
-  insert(foo,E,{tobbe,E}),
-  Ss = sub(L,E),
-  try length([{tobbe,I}=lookup(foo,I) || I <- Ss])
-  catch _:R -> exit({R,E,Ss})
-  end.
-
-sub([E|_],E) -> [E];
-sub([H|T],E) -> [H|sub(T,E)].
-
-shuffle(L) ->
-  [V||{_,V}<-lists:sort([{random:uniform(),E}||E<-L])].

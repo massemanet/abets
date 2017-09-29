@@ -3,4 +3,5 @@
 *\#
 .\#*
 /foo
-/ebin
+/_build
+rebar.lock
