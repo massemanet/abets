@@ -294,8 +294,9 @@ nlf(Key, [I|R])        -> [I|nlf(Key, R)].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_lookup(Key, State) ->
   try
-    [Leaf|_] = find_nodes(Key, State),
-    {Key, #blob{data=Data}} = read_blob(Key, Leaf, State),
+    [#node{type=leaf, recs=Recs}|_] = find_nodes(Key, State),
+    {Key, Pos} = drop_until(Key, Recs),
+    #blob{data=Data} = read_blob_fw(Pos, State),
     {Data}
   catch
     _:R -> {not_found, Key, R}
@@ -303,8 +304,9 @@ do_lookup(Key, State) ->
 
 do_next(Key, State) ->
   try
-    [Leaf|_] = find_nodes(Key, State),
-    {K, #blob{data=Data}} = read_blob(Key, Leaf, State),
+    [#node{type=leaf, recs=Recs}|_] = find_nodes(Key, State),
+    {K, Pos} = drop_until(Key, Recs),
+    #blob{data=Data} = read_blob_fw(Pos, State),
     {K, Data}
   catch
     _:R -> {not_found, Key, R}
@@ -327,10 +329,6 @@ find(Key, [{K0, P0}, {K1, P1}|Recs]) ->
   end;
 find(_, [{_, P0}]) ->
   P0.
-
-read_blob(Key, #node{type=leaf, recs=Recs}, State) ->
-  {K, Pos} = drop_until(Key, Recs),
-  {K, read_blob_fw(Pos, State)}.
 
 drop_until(K, [{K0, V}|_]) when K =< K0 -> {K0, V};
 drop_until(K, [_|KVs]) -> drop_until(K, KVs);
