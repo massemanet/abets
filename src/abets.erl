@@ -304,15 +304,25 @@ do_lookup(Key, State) ->
 
 do_next(Key, State) ->
   try
-    case leftrecs(Key, State) of
-      [[{K, Pos}|_]|_] ->
-        #blob{data=Data} = read_blob_fw(Pos, State),
-        {K, Data};
-      [[]|KVs] ->
-        exit({backtrack, KVs})
-    end
+    lefty(leftrecs(Key, State), Key, State)
   catch
     _:R -> {not_found, Key, R}
+  end.
+
+lefty(Recss, Key, State) ->
+  case Recss of
+    [[{K, Pos}|_]|_] ->
+      #blob{data=Data} = read_blob_fw(Pos, State),
+      {K, Data};
+    [[]|OKPss] ->
+      case lists:dropwhile(fun(KPs) -> length(KPs) < 2 end, OKPss) of
+        [] ->
+          exit({not_found, eof});
+        [[_, {K, Pos}|KPs]|KPss] ->
+          Node = read_blob_fw(Pos, State),
+          LeftRecs = leftrecs(Key, Node, [[{K, Pos}|KPs]|KPss], State),
+          lefty(LeftRecs, Key, State)
+      end
   end.
 
 leftrecs(Key, State) ->

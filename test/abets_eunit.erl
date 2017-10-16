@@ -7,15 +7,15 @@
 -include_lib("eunit/include/eunit.hrl").
 
 basic_test_() ->
-    {inorder,
-     {"basic happy testing.",
-      {foreach,
-       fun start/0,
-       fun stop/1,
-       [fun t_bulk/1,
-        fun t_unit/1,
-        fun t_next/1]
-      }}}.
+  {inorder,
+   {"basic happy testing.",
+    {foreach,
+     fun start/0,
+     fun stop/1,
+     [fun t_bulk/1,
+      fun t_unit/1,
+      fun t_next/1]
+    }}}.
 
 start() ->
   catch abets:destroy(foo).
@@ -28,10 +28,30 @@ t_next(_) ->
 
 nxt() ->
   abets:new(foo),
-  [abets:insert(foo, {k, I}, {v, I}) || I <- lists:seq(1,5,2)],
-  ?assertMatch({{k, 1}, {v, 1}}, abets:next(foo, {k, 0})),
-  ?assertMatch({{k, 3}, {v, 3}}, abets:next(foo, {k, 2})),
-  ?assertMatch({not_found, {k, 6}, _}, abets:next(foo, {k, 6})).
+  [abets:insert(foo, {k, I}, {v, I}) || I <- lists:seq(1,19,2)],
+  ?assertMatch(
+     [{{k,1},{v,1}},
+      {{k,1},{v,1}},
+      {{k,3},{v,3}},
+      {{k,3},{v,3}},
+      {{k,5},{v,5}},
+      {{k,5},{v,5}},
+      {{k,7},{v,7}},
+      {{k,7},{v,7}},
+      {{k,9},{v,9}},
+      {{k,9},{v,9}},
+      {{k,11},{v,11}},
+      {{k,11},{v,11}},
+      {{k,13},{v,13}},
+      {{k,13},{v,13}},
+      {{k,15},{v,15}},
+      {{k,15},{v,15}},
+      {{k,17},{v,17}},
+      {{k,17},{v,17}},
+      {{k,19},{v,19}},
+      {{k,19},{v,19}},
+      {not_found,{k,20},{not_found,eof}}],
+     [abets:next(foo, {k, I}) || I <- lists:seq(0, 20)]).
 
 t_bulk(_) ->
   [fun() -> bulk(33) end].
