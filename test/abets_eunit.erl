@@ -31,7 +31,6 @@ nxt() ->
   [abets:insert(foo, {k, I}, {v, I}) || I <- lists:seq(1,19,2)],
   ?assertMatch(
      [{{k,1},{v,1}},
-      {{k,1},{v,1}},
       {{k,3},{v,3}},
       {{k,3},{v,3}},
       {{k,5},{v,5}},
@@ -50,7 +49,8 @@ nxt() ->
       {{k,17},{v,17}},
       {{k,19},{v,19}},
       {{k,19},{v,19}},
-      {not_found,{k,20},{not_found,eof}}],
+      {no_next_found,{k,19},{not_found,eof}},
+      {no_next_found,{k,20},{not_found,eof}}],
      [abets:next(foo, {k, I}) || I <- lists:seq(0, 20)]).
 
 t_bulk(_) ->

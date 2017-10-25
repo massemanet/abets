@@ -295,18 +295,24 @@ nlf(Key, [I|R])        -> [I|nlf(Key, R)].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_lookup(Key, State) ->
   try
-    [[{Key, Pos}|_]|_] = leftrecs(Key, State),
+    {Key, Pos} = exact_pos(Key, read_blob_bw(eof, State), State),
     #blob{data=Data} = read_blob_fw(Pos, State),
     {Data}
   catch
     _:R -> {not_found, Key, R}
   end.
 
+exact_pos(Key, #node{type=leaf, recs=Recs}, _) ->
+  lists:keyfind(Key, 1, Recs);
+exact_pos(Key, #node{recs=Recs}, State) ->
+  [{_, Pos}|_] = drop_rights(Key, Recs),
+  exact_pos(Key, read_blob_fw(Pos, State), State).
+
 do_next(Key, State) ->
   try
-    lefty(leftrecs(Key, State), Key, State)
+    lefty(leftrecs(Key, read_blob_bw(eof, State), [], State), Key, State)
   catch
-    _:R -> {not_found, Key, R}
+    _:R -> {no_next_found, Key, R}
   end.
 
 lefty(Recss, Key, State) ->
@@ -325,20 +331,17 @@ lefty(Recss, Key, State) ->
       end
   end.
 
-leftrecs(Key, State) ->
-  leftrecs(Key, read_blob_bw(eof, State), [], State).
-
 leftrecs(Key, #node{type=leaf, recs=Recs}, O, _) ->
-  [lists:dropwhile(fun({K, _}) -> K < Key end, Recs)|O];
+  [lists:dropwhile(fun({K, _}) -> K =< Key end, Recs)|O];
 leftrecs(_, #node{type=root, recs=[]}, [], _) ->
   [[]];
 leftrecs(Key, #node{recs=Recs}, O, State) ->
-  [{_, Pos}|_] = LeftRecs = dropwhile(Key, Recs),
+  [{_, Pos}|_] = LeftRecs = drop_rights(Key, Recs),
   leftrecs(Key, read_blob_fw(Pos, State), [LeftRecs|O], State).
 
-dropwhile(_, [_] = KVs) -> KVs;
-dropwhile(Key, [_, {K1, _}|_] = KVs) when Key < K1 -> KVs;
-dropwhile(Key, [_|KVs]) -> dropwhile(Key, KVs).
+drop_rights(_, [_] = KVs) -> KVs;
+drop_rights(Key, [_, {K1, _}|_] = KVs) when Key < K1 -> KVs;
+drop_rights(Key, [_|KVs]) -> drop_rights(Key, KVs).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_bulk(commit, _, _, State)->
