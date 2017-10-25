@@ -291,50 +291,58 @@ nullify(Key, Leaf = #node{recs=Recs}) ->
 
 nlf(Key, [{Key, _}|R]) -> [{Key, 0}|R];
 nlf(Key, [I|R])        -> [I|nlf(Key, R)].
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_lookup(Key, State) ->
   try
-    [Leaf|_] = find_nodes(Key, State),
-    {Key, #blob{data=Data}} = read_blob(Key, Leaf, State),
+    {Key, Pos} = exact_pos(Key, read_blob_bw(eof, State), State),
+    #blob{data=Data} = read_blob_fw(Pos, State),
     {Data}
   catch
     _:R -> {not_found, Key, R}
   end.
 
+exact_pos(Key, #node{type=leaf, recs=Recs}, _) ->
+  lists:keyfind(Key, 1, Recs);
+exact_pos(Key, #node{recs=Recs}, State) ->
+  [{_, Pos}|_] = drop_rights(Key, Recs),
+  exact_pos(Key, read_blob_fw(Pos, State), State).
+
 do_next(Key, State) ->
   try
-    [Leaf|_] = find_nodes(Key, State),
-    {K, #blob{data=Data}} = read_blob(Key, Leaf, State),
-    {K, Data}
+    lefty(leftrecs(Key, read_blob_bw(eof, State), [], State), Key, State)
   catch
-    _:R -> {not_found, Key, R}
+    _:R -> {no_next_found, Key, R}
   end.
 
-find_nodes(Key, State) ->
-  find_nodes(Key, read_blob_bw(eof, State), [], State).
+lefty(Recss, Key, State) ->
+  case Recss of
+    [[{K, Pos}|_]|_] ->
+      #blob{data=Data} = read_blob_fw(Pos, State),
+      {K, Data};
+    [[]|OKPss] ->
+      case lists:dropwhile(fun(KPs) -> length(KPs) < 2 end, OKPss) of
+        [] ->
+          exit({not_found, eof});
+        [[_, {K, Pos}|KPs]|KPss] ->
+          Node = read_blob_fw(Pos, State),
+          LeftRecs = leftrecs(Key, Node, [[{K, Pos}|KPs]|KPss], State),
+          lefty(LeftRecs, Key, State)
+      end
+  end.
 
-find_nodes(_, N = #node{type=leaf}, O, _) ->
-  [N|O];
-find_nodes(Key, N = #node{type=root, recs=[]}, [], _) ->
-  [mk_leaf([], 0), N#node{max_key=Key}];
-find_nodes(Key, N = #node{recs=Recs}, O, State) ->
-  find_nodes(Key, read_blob_fw(find(Key, Recs), State), [N|O], State).
+leftrecs(Key, #node{type=leaf, recs=Recs}, O, _) ->
+  [lists:dropwhile(fun({K, _}) -> K =< Key end, Recs)|O];
+leftrecs(_, #node{type=root, recs=[]}, [], _) ->
+  [[]];
+leftrecs(Key, #node{recs=Recs}, O, State) ->
+  [{_, Pos}|_] = LeftRecs = drop_rights(Key, Recs),
+  leftrecs(Key, read_blob_fw(Pos, State), [LeftRecs|O], State).
 
-find(Key, [{K0, P0}, {K1, P1}|Recs]) ->
-  case K0 =< Key andalso Key < K1 of
-    true -> P0;
-    false-> find(Key, [{K1, P1}|Recs])
-  end;
-find(_, [{_, P0}]) ->
-  P0.
+drop_rights(_, [_] = KVs) -> KVs;
+drop_rights(Key, [_, {K1, _}|_] = KVs) when Key < K1 -> KVs;
+drop_rights(Key, [_|KVs]) -> drop_rights(Key, KVs).
 
-read_blob(Key, #node{type=leaf, recs=Recs}, State) ->
-  {K, Pos} = drop_until(Key, Recs),
-  {K, read_blob_fw(Pos, State)}.
-
-drop_until(K, [{K0, V}|_]) when K =< K0 -> {K0, V};
-drop_until(K, [_|KVs]) -> drop_until(K, KVs);
-drop_until(K, []) ->  exit({not_found, K}).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_bulk(commit, _, _, State)->
   finalize(State);
@@ -466,6 +474,24 @@ mk_leaf_bulk(Blobs, Eof) ->
 
 boff_f(#blob{key=Key, size=Size}, {Eof, Recs})->
   {Eof+Size, Recs++[{Key, Eof}]}.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% return a list of parent nodes, leaf first, root last
+
+find_nodes(_, N = #node{type=leaf}, O, _) ->
+  [N|O];
+find_nodes(Key, N = #node{type=root, recs=[]}, [], _) ->
+  [mk_leaf([], 0), N#node{max_key=Key}];
+find_nodes(Key, N = #node{recs=Recs}, O, State) ->
+  find_nodes(Key, read_blob_fw(pointer(Key, Recs), State), [N|O], State).
+
+pointer(Key, [{K0, P0}, {K1, P1}|Recs]) ->
+  case K0 =< Key andalso Key < K1 of
+    true -> P0;
+    false-> pointer(Key, [{K1, P1}|Recs])
+  end;
+pointer(_, [{_, P0}]) ->
+  P0.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% file ops
