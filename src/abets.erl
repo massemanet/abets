@@ -19,6 +19,7 @@
          insert/3,
          delete/2,
          lookup/2,
+         foldl/3, foldl/4,
          bulk/2, bulk/3,
          first/1,
          last/1,
@@ -93,6 +94,12 @@ lookup(Tab, Key) ->
     Error -> exit(Error)
   end.
 
+foldl(Tab, Fun, Acc) ->
+  foldl(Tab, Fun, Acc, #{}).
+
+foldl(Tab, Fun, Acc, Range) ->
+  call(Tab, {foldl, Fun, Acc, Range}).
+
 first(Tab) ->
   call(Tab, {first}).
 
@@ -151,15 +158,16 @@ safer(What, State) ->
   catch C:R -> {{C, R, erlang:get_stacktrace()}, State}
   end.
 
-do_safer({insert, Key, Val}, State) -> {ok, do_insert(Key, Val, State)};
-do_safer({lookup, Key}, State)      -> {do_lookup(Key, State), State};
-do_safer({next, Key}, State)        -> {do_next(Key, State), State};
-do_safer({delete, Key}, State)      -> {do_delete(Key, State), State};
-do_safer({first}, State)            -> {do_first(State), State};
-do_safer({last}, State)             -> {do_last(State), State};
-do_safer({bulk, Key, Val}, State)   -> {ok, do_bulk(insert, Key, Val, State)};
-do_safer({bulk, commit}, State)     -> {ok, do_bulk(commit, '', '', State)};
-do_safer({decompose, N}, State)     -> {do_decompose(N, State), State}.
+do_safer({insert, Key, Val}, S)       -> {ok, do_insert(Key, Val, S)};
+do_safer({lookup, Key}, S)            -> {do_lookup(Key, S), S};
+do_safer({next, Key}, S)              -> {do_next(Key, S), S};
+do_safer({foldl, Fun, Acc, Range}, S) -> {do_foldl(Fun, Acc, Range, S), S};
+do_safer({delete, Key}, S)            -> {do_delete(Key, S), S};
+do_safer({first}, S)                  -> {do_first(S), S};
+do_safer({last}, S)                   -> {do_last(S), S};
+do_safer({bulk, Key, Val}, S)         -> {ok, do_bulk(insert, Key, Val, S)};
+do_safer({bulk, commit}, S)           -> {ok, do_bulk(commit, '', '', S)};
+do_safer({decompose, N}, S)           -> {do_decompose(N, S), S}.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 do_new(Tab, How) ->
@@ -293,6 +301,9 @@ nlf(Key, [{Key, _}|R]) -> [{Key, 0}|R];
 nlf(Key, [I|R])        -> [I|nlf(Key, R)].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+do_foldl(_Fun, _Acc, _Range, _State) ->
+  [].
+
 do_lookup(Key, State) ->
   try
     {Key, Pos} = exact_pos(Key, read_blob_bw(eof, State), State),
