@@ -301,8 +301,17 @@ nlf(Key, [{Key, _}|R]) -> [{Key, 0}|R];
 nlf(Key, [I|R])        -> [I|nlf(Key, R)].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-do_foldl(_Fun, _Acc, _Range, _State) ->
-  [].
+do_foldl(Fun, Acc, Range, State) ->
+  case read_blob_bw(eof, State) of
+    #node{type=root, recs=[]} -> [];
+    #node{type=root} = Root ->
+      From = maps:get(from, Range, get_max(Root)),
+      To = maps:get(to, Range, get_min(Root)),
+      [LeafRecs|_LeftRecs] = drop_rights(From, Root, [], State),
+      [{From, Pos}|_KPs] = lists:dropwhile(fun({K, _}) -> K < From end, LeafRecs),
+      #blob{data=Val} = read_blob_fw(Pos, State),
+      [Fun(From, Val, Acc),{From, To}]
+  end.
 
 do_lookup(Key, State) ->
   try
@@ -312,12 +321,6 @@ do_lookup(Key, State) ->
   catch
     _:R -> {not_found, Key, R}
   end.
-
-exact_pos(Key, #node{type=leaf, recs=Recs}, _) ->
-  lists:keyfind(Key, 1, Recs);
-exact_pos(Key, #node{recs=Recs}, State) ->
-  [{_, Pos}|_] = drop_rights(Key, Recs),
-  exact_pos(Key, read_blob_fw(Pos, State), State).
 
 do_next(Key, State) ->
   try
@@ -342,13 +345,21 @@ lefty(Recss, Key, State) ->
       end
   end.
 
-leftrecs(Key, #node{type=leaf, recs=Recs}, O, _) ->
-  [lists:dropwhile(fun({K, _}) -> K =< Key end, Recs)|O];
-leftrecs(_, #node{type=root, recs=[]}, [], _) ->
+exact_pos(Key, Node, State) ->
+  [LeafRecs|_] = drop_rights(Key, Node, [], State),
+  lists:keyfind(Key, 1, LeafRecs).
+
+leftrecs(Key, Node, O, State) ->
+  [LeafRecs|R] = drop_rights(Key, Node, O, State),
+  [lists:dropwhile(fun({K, _}) -> K =< Key end, LeafRecs)|R].
+
+drop_rights(_, #node{type=leaf, recs=Recs}, O, _) ->
+  [Recs|O];
+drop_rights(_, #node{type=root, recs=[]}, [], _) ->
   [[]];
-leftrecs(Key, #node{recs=Recs}, O, State) ->
-  [{_, Pos}|_] = LeftRecs = drop_rights(Key, Recs),
-  leftrecs(Key, read_blob_fw(Pos, State), [LeftRecs|O], State).
+drop_rights(Key, #node{recs=Recs}, O, State) ->
+  [{_, Pos}|_] = Drop_Rights = drop_rights(Key, Recs),
+  drop_rights(Key, read_blob_fw(Pos, State), [Drop_Rights|O], State).
 
 drop_rights(_, [_] = KVs) -> KVs;
 drop_rights(Key, [_, {K1, _}|_] = KVs) when Key < K1 -> KVs;
