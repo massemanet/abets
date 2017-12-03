@@ -14,7 +14,8 @@ basic_test_() ->
      fun stop/1,
      [fun t_bulk/1,
       fun t_unit/1,
-      fun t_next/1]
+      fun t_next/1,
+      fun t_range/1]
     }}}.
 
 start() ->
@@ -23,6 +24,19 @@ start() ->
 stop(_) ->
   ok.
 
+%%%----------------------------------------------------------------------------
+t_range(_) ->
+  [fun rng1/0].
+
+rng1() ->
+  abets:new(foo),
+  [abets:insert(foo, I, I) || I <- lists:seq(1, 7, 2)],
+  F = fun(R) -> abets:foldl(foo, fun(K, _, A) -> [K|A] end, [], R) end,
+  ?assertMatch([1], F(#{from=>0, to=>1})),
+  ?assertMatch([7,5,3,1], F(#{from=>0, to=>100})),
+  ?assertMatch([], F(#{from=>99, to=>100})).
+
+%%%----------------------------------------------------------------------------
 t_next(_) ->
   [fun() -> nxt() end].
 
@@ -49,10 +63,11 @@ nxt() ->
       {{k,17},{v,17}},
       {{k,19},{v,19}},
       {{k,19},{v,19}},
-      {no_next_found,{k,19},{not_found,eof}},
-      {no_next_found,{k,20},{not_found,eof}}],
+      eof,
+      eof],
      [abets:next(foo, {k, I}) || I <- lists:seq(0, 20)]).
 
+%%%----------------------------------------------------------------------------
 t_bulk(_) ->
   [fun() -> bulk(33) end].
 
@@ -69,6 +84,7 @@ ubf(M)->
    catch _:R -> exit({R, N, lists:last(Seq)})
    end || N <- Seq].
 
+%%%----------------------------------------------------------------------------
 t_unit(_) ->
   [fun() -> unit(100) end].
 

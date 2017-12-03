@@ -89,8 +89,11 @@ delete(Tab, Key) ->
   call(Tab, {delete, Key}).
 
 lookup(Tab, Key) ->
-  case call(Tab, {lookup, Key}) of
-    {Res} -> Res;
+  Fun = fun(K, V, A) -> [{K, V}|A] end,
+  Range = #{from=>Key, to=>Key},
+  case foldl(Tab, Fun, [], Range) of
+    [{Key, Val}] -> Val;
+    [] -> exit({not_found, Key});
     Error -> exit(Error)
   end.
 
@@ -159,7 +162,6 @@ safer(What, State) ->
   end.
 
 do_safer({insert, Key, Val}, S)       -> {ok, do_insert(Key, Val, S)};
-do_safer({lookup, Key}, S)            -> {do_lookup(Key, S), S};
 do_safer({next, Key}, S)              -> {do_next(Key, S), S};
 do_safer({foldl, Fun, Acc, Range}, S) -> {do_foldl(Fun, Acc, Range, S), S};
 do_safer({delete, Key}, S)            -> {do_delete(Key, S), S};
@@ -301,62 +303,87 @@ nlf(Key, [{Key, _}|R]) -> [{Key, 0}|R];
 nlf(Key, [I|R])        -> [I|nlf(Key, R)].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-do_foldl(Fun, Acc, Range, State) ->
-  case read_blob_bw(eof, State) of
-    #node{type=root, recs=[]} -> [];
-    #node{type=root} = Root ->
-      From = maps:get(from, Range, get_max(Root)),
-      To = maps:get(to, Range, get_min(Root)),
-      [LeafRecs|_LeftRecs] = drop_rights(From, Root, [], State),
-      [{From, Pos}|_KPs] = lists:dropwhile(fun({K, _}) -> K < From end, LeafRecs),
-      #blob{data=Val} = read_blob_fw(Pos, State),
-      [Fun(From, Val, Acc),{From, To}]
-  end.
-
-do_lookup(Key, State) ->
-  try
-    {Key, Pos} = exact_pos(Key, read_blob_bw(eof, State), State),
-    #blob{data=Data} = read_blob_fw(Pos, State),
-    {Data}
-  catch
-    _:R -> {not_found, Key, R}
-  end.
 
 do_next(Key, State) ->
-  try
-    lefty(leftrecs(Key, read_blob_bw(eof, State), [], State), Key, State)
-  catch
-    _:R -> {no_next_found, Key, R}
-  end.
-
-lefty(Recss, Key, State) ->
-  case Recss of
-    [[{K, Pos}|_]|_] ->
-      #blob{data=Data} = read_blob_fw(Pos, State),
-      {K, Data};
-    [[]|OKPss] ->
-      case lists:dropwhile(fun(KPs) -> length(KPs) < 2 end, OKPss) of
-        [] ->
-          exit({not_found, eof});
-        [[_, {K, Pos}|KPs]|KPss] ->
-          Node = read_blob_fw(Pos, State),
-          LeftRecs = leftrecs(Key, Node, [[{K, Pos}|KPs]|KPss], State),
-          lefty(LeftRecs, Key, State)
+  case get_root(State) of
+    empty ->
+      eof;
+    Root ->
+      KPss = leftrecs(Key, Root, [], State),
+      case next_kp(KPss, Key, State) of
+        eof ->
+          eof;
+        {{K, Pos}, _} ->
+          #blob{data=Val} = read_blob_fw(Pos, State),
+          {K, Val}
       end
   end.
 
-exact_pos(Key, Node, State) ->
-  [LeafRecs|_] = drop_rights(Key, Node, [], State),
-  lists:keyfind(Key, 1, LeafRecs).
+do_foldl(Fun, Acc, Range, State) ->
+  case get_root(State) of
+    empty ->
+      [];
+    Root ->
+      From = maps:get(from, Range, get_max(Root)),
+      To = maps:get(to, Range, get_min(Root)),
+      try get_first(From, Root, State) of
+        {To, Val, _} ->
+          Fun(To, Val, Acc);
+        {K, Val, KPss} ->
+          folder(Fun, Fun(K, Val, Acc), To, next_kp(KPss, K, State), State)
+      catch
+        _:_ -> []
+      end
+  end.
+
+get_root(State) ->
+  case read_blob_bw(eof, State) of
+    #node{type=root, recs=[]} ->
+      [];
+    #node{type=root} = Root ->
+      Root;
+    Blob ->
+      error({file_corruption, Blob})
+  end.
+
+get_first(From, Root, State) ->
+  [LeafRecs|KPss] = drop_rights(From, Root, [], State),
+  [{K, Pos}|KPs] = lists:dropwhile(fun({K, _}) -> K < From end, LeafRecs),
+  #blob{data=Val} = read_blob_fw(Pos, State),
+  {K, Val, [KPs|KPss]}.
+
+folder(_, Acc, _, eof, _) ->
+  Acc;
+folder(Fun, Acc, To, {{Key, Pos}, KPss}, State) ->
+  case Key =< To of
+    true ->
+      #blob{data=Val} = read_blob_fw(Pos, State),
+      folder(Fun, Fun(Key, Val, Acc), To, next_kp(KPss, Key, State), State);
+    false ->
+      Acc
+  end.
+
+next_kp(Recss, Key, State) ->
+  case Recss of
+    [[KP|KPs]|KPss] ->
+      {KP, [KPs|KPss]};
+    [[]|OKPss] ->
+      case lists:dropwhile(fun(KPs) -> length(KPs) < 2 end, OKPss) of
+        [] ->
+          eof;
+        [[_, {K, Pos}|KPs]|KPss] ->
+          Node = read_blob_fw(Pos, State),
+          NKPss = leftrecs(Key, Node, [[{K, Pos}|KPs]|KPss], State),
+          next_kp(NKPss, Key, State)
+      end
+  end.
 
 leftrecs(Key, Node, O, State) ->
-  [LeafRecs|R] = drop_rights(Key, Node, O, State),
-  [lists:dropwhile(fun({K, _}) -> K =< Key end, LeafRecs)|R].
+  [LeafRecs|KPss] = drop_rights(Key, Node, O, State),
+  [lists:dropwhile(fun({K, _}) -> K =< Key end, LeafRecs)|KPss].
 
 drop_rights(_, #node{type=leaf, recs=Recs}, O, _) ->
   [Recs|O];
-drop_rights(_, #node{type=root, recs=[]}, [], _) ->
-  [[]];
 drop_rights(Key, #node{recs=Recs}, O, State) ->
   [{_, Pos}|_] = Drop_Rights = drop_rights(Key, Recs),
   drop_rights(Key, read_blob_fw(Pos, State), [Drop_Rights|O], State).
