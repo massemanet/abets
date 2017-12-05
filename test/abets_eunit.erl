@@ -15,7 +15,8 @@ basic_test_() ->
      [fun t_bulk/1,
       fun t_unit/1,
       fun t_next/1,
-      fun t_range/1]
+      fun t_range/1,
+      fun t_del/1]
     }}}.
 
 start() ->
@@ -25,15 +26,42 @@ stop(_) ->
   ok.
 
 %%%----------------------------------------------------------------------------
+t_del(_) ->
+  [fun del1/0].
+
+del1() ->
+  abets:new(foo),
+%  ?assertMatch([], abets:delete(foo, 0)),
+  abets:insert(foo, 1, 1),
+  ?assertMatch(1, abets:first(foo)),
+  ?assertMatch(1, abets:last(foo)),
+  ?assertMatch([{1, 1}], abets:delete(foo, 1)),
+  ?assertMatch([], abets:first(foo)),
+  ?assertMatch([], abets:last(foo)).
+
+%%%----------------------------------------------------------------------------
 t_range(_) ->
   [fun rng1/0].
 
 rng1() ->
-  abets:new(foo),
-  [abets:insert(foo, I, I) || I <- lists:seq(1, 7, 2)],
   F = fun(R) -> abets:foldl(foo, fun(K, _, A) -> [K|A] end, [], R) end,
+  abets:new(foo),
+  ?assertMatch([], F(#{from=>0, to=>0})),
+  ?assertMatch([], F(#{from=>0, to=>1})),
+  ?assertMatch([], F(#{from=>1, to=>0})),
+  [abets:insert(foo, I, I) || I <- lists:seq(1, 7, 2)],
+  ?assertMatch({error, bad_range}, F(#{from=>1, to=>0})),
+  ?assertMatch([], F(#{from=>0, to=>0})),
   ?assertMatch([1], F(#{from=>0, to=>1})),
+  ?assertMatch([1], F(#{from=>0, to=>2})),
+  ?assertMatch([1], F(#{from=>1, to=>1})),
+  ?assertMatch([5,3], F(#{from=>2, to=>5})),
+  ?assertMatch([5,3], F(#{from=>3, to=>5})),
+  ?assertMatch([5,3], F(#{from=>2, to=>6})),
+  ?assertMatch([5,3], F(#{from=>3, to=>6})),
   ?assertMatch([7,5,3,1], F(#{from=>0, to=>100})),
+  ?assertMatch([7], F(#{from=>6, to=>100})),
+  ?assertMatch([7], F(#{from=>7, to=>100})),
   ?assertMatch([], F(#{from=>99, to=>100})).
 
 %%%----------------------------------------------------------------------------
@@ -42,6 +70,7 @@ t_next(_) ->
 
 nxt() ->
   abets:new(foo),
+  ?assertMatch(eof, abets:next(foo, 0)),
   [abets:insert(foo, {k, I}, {v, I}) || I <- lists:seq(1,19,2)],
   ?assertMatch(
      [{{k,1},{v,1}},

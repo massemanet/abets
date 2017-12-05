@@ -326,20 +326,26 @@ do_foldl(Fun, Acc, Range, State) ->
     Root ->
       From = maps:get(from, Range, get_max(Root)),
       To = maps:get(to, Range, get_min(Root)),
-      try get_first(From, Root, State) of
-        {To, Val, _} ->
-          Fun(To, Val, Acc);
-        {K, Val, KPss} ->
-          folder(Fun, Fun(K, Val, Acc), To, next_kp(KPss, K, State), State)
-      catch
-        _:_ -> []
+      case To < From of
+        true -> {error, bad_range};
+        false ->
+          try get_first(From, Root, State) of
+            {K, _, _} when To < K ->
+              [];
+            {To, Val, _} ->
+              Fun(To, Val, Acc);
+            {K, Val, KPss} ->
+              folder(Fun, Fun(K, Val, Acc), To, next_kp(KPss, K, State), State)
+          catch
+            _:_ -> []
+          end
       end
   end.
 
 get_root(State) ->
   case read_blob_bw(eof, State) of
     #node{type=root, recs=[]} ->
-      [];
+      empty;
     #node{type=root} = Root ->
       Root;
     Blob ->
